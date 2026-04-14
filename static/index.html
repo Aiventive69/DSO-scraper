@@ -1,0 +1,1007 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DSO Omgevingsplan Assistent</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --primary: #1a56db;
+      --primary-hover: #1e429f;
+      --primary-light: #ebf5ff;
+      --success: #0e9f6e;
+      --warning: #c27803;
+      --danger: #e02424;
+      --gray-50: #f9fafb;
+      --gray-100: #f3f4f6;
+      --gray-200: #e5e7eb;
+      --gray-300: #d1d5db;
+      --gray-400: #9ca3af;
+      --gray-500: #6b7280;
+      --gray-600: #4b5563;
+      --gray-700: #374151;
+      --gray-800: #1f2937;
+      --gray-900: #111827;
+      --radius: 10px;
+      --shadow: 0 1px 3px rgba(0,0,0,.08), 0 4px 16px rgba(0,0,0,.06);
+      --shadow-lg: 0 4px 6px rgba(0,0,0,.07), 0 10px 40px rgba(0,0,0,.1);
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      font-family: 'Inter', sans-serif;
+      background: #f0f4f8;
+      color: var(--gray-800);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* Header */
+    header {
+      background: linear-gradient(135deg, #1a56db 0%, #1e429f 100%);
+      color: white;
+      padding: 0 2rem;
+    }
+
+    .header-inner {
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 1.5rem 0;
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+
+    .logo-icon {
+      width: 44px;
+      height: 44px;
+      background: rgba(255,255,255,.2);
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.4rem;
+    }
+
+    .header-text h1 {
+      font-size: 1.35rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+
+    .header-text p {
+      font-size: 0.82rem;
+      opacity: 0.8;
+      margin-top: 2px;
+    }
+
+    .header-badge {
+      margin-left: auto;
+      background: rgba(255,255,255,.15);
+      border: 1px solid rgba(255,255,255,.25);
+      border-radius: 20px;
+      padding: .3rem .8rem;
+      font-size: .72rem;
+      font-weight: 500;
+      white-space: nowrap;
+    }
+
+    /* Main */
+    main {
+      flex: 1;
+      max-width: 960px;
+      margin: 0 auto;
+      width: 100%;
+      padding: 2rem 1rem 4rem;
+    }
+
+    /* Query Card */
+    .query-card {
+      background: white;
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 2rem;
+      margin-bottom: 1.5rem;
+    }
+
+    .query-card h2 {
+      font-size: 1.1rem;
+      font-weight: 600;
+      color: var(--gray-800);
+      margin-bottom: .25rem;
+    }
+
+    .query-card p.subtitle {
+      font-size: .85rem;
+      color: var(--gray-500);
+      margin-bottom: 1.5rem;
+    }
+
+    /* Form */
+    .form-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+      margin-bottom: 1rem;
+    }
+
+    @media (max-width: 600px) {
+      .form-grid { grid-template-columns: 1fr; }
+    }
+
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: .4rem;
+      position: relative;
+    }
+
+    .form-group.full-width {
+      grid-column: 1 / -1;
+    }
+
+    label {
+      font-size: .8rem;
+      font-weight: 600;
+      color: var(--gray-600);
+      letter-spacing: .02em;
+      text-transform: uppercase;
+    }
+
+    input, textarea {
+      border: 1.5px solid var(--gray-200);
+      border-radius: 8px;
+      padding: .7rem .9rem;
+      font-size: .92rem;
+      font-family: 'Inter', sans-serif;
+      color: var(--gray-800);
+      background: var(--gray-50);
+      transition: border-color .15s, box-shadow .15s, background .15s;
+      width: 100%;
+      outline: none;
+    }
+
+    input:focus, textarea:focus {
+      border-color: var(--primary);
+      background: white;
+      box-shadow: 0 0 0 3px rgba(26,86,219,.1);
+    }
+
+    textarea {
+      resize: vertical;
+      min-height: 72px;
+    }
+
+    /* Autocomplete */
+    .autocomplete-wrapper {
+      position: relative;
+    }
+
+    .autocomplete-list {
+      position: absolute;
+      top: calc(100% + 4px);
+      left: 0;
+      right: 0;
+      background: white;
+      border: 1.5px solid var(--gray-200);
+      border-radius: 8px;
+      box-shadow: var(--shadow-lg);
+      z-index: 100;
+      max-height: 240px;
+      overflow-y: auto;
+      display: none;
+    }
+
+    .autocomplete-list.show { display: block; }
+
+    .autocomplete-item {
+      padding: .65rem .9rem;
+      cursor: pointer;
+      font-size: .88rem;
+      color: var(--gray-700);
+      border-bottom: 1px solid var(--gray-100);
+      display: flex;
+      align-items: center;
+      gap: .6rem;
+      transition: background .1s;
+    }
+
+    .autocomplete-item:last-child { border-bottom: none; }
+    .autocomplete-item:hover, .autocomplete-item.active { background: var(--primary-light); color: var(--primary); }
+
+    .autocomplete-item svg { flex-shrink: 0; opacity: .5; }
+
+    /* Quick questions */
+    .quick-questions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: .5rem;
+      margin-bottom: 1.25rem;
+    }
+
+    .quick-questions span {
+      font-size: .75rem;
+      font-weight: 600;
+      color: var(--gray-500);
+      text-transform: uppercase;
+      letter-spacing: .04em;
+      align-self: center;
+      white-space: nowrap;
+    }
+
+    .quick-btn {
+      background: var(--gray-100);
+      border: 1.5px solid var(--gray-200);
+      border-radius: 20px;
+      padding: .35rem .8rem;
+      font-size: .78rem;
+      font-weight: 500;
+      color: var(--gray-600);
+      cursor: pointer;
+      transition: all .15s;
+      font-family: 'Inter', sans-serif;
+    }
+
+    .quick-btn:hover {
+      background: var(--primary-light);
+      border-color: var(--primary);
+      color: var(--primary);
+    }
+
+    /* Submit button */
+    .btn-submit {
+      background: linear-gradient(135deg, #1a56db, #1e429f);
+      color: white;
+      border: none;
+      border-radius: 8px;
+      padding: .8rem 2rem;
+      font-size: .95rem;
+      font-weight: 600;
+      font-family: 'Inter', sans-serif;
+      cursor: pointer;
+      transition: opacity .15s, transform .1s;
+      display: flex;
+      align-items: center;
+      gap: .6rem;
+      min-width: 180px;
+      justify-content: center;
+    }
+
+    .btn-submit:hover:not(:disabled) { opacity: .9; transform: translateY(-1px); }
+    .btn-submit:active:not(:disabled) { transform: translateY(0); }
+    .btn-submit:disabled { opacity: .6; cursor: not-allowed; }
+
+    /* Spinner */
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spinner {
+      width: 18px;
+      height: 18px;
+      border: 2.5px solid rgba(255,255,255,.4);
+      border-top-color: white;
+      border-radius: 50%;
+      animation: spin .7s linear infinite;
+    }
+
+    /* Status bar */
+    .status-bar {
+      background: #fffbeb;
+      border: 1px solid #fde68a;
+      border-radius: 8px;
+      padding: .65rem 1rem;
+      font-size: .83rem;
+      color: var(--warning);
+      margin-bottom: 1rem;
+      display: none;
+      align-items: center;
+      gap: .5rem;
+    }
+
+    .status-bar.show { display: flex; }
+
+    .status-step {
+      display: flex;
+      align-items: center;
+      gap: .4rem;
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--warning);
+      animation: pulse 1s infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: .3; }
+    }
+
+    /* Results */
+    #result-section { display: none; }
+
+    .result-header {
+      background: white;
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 1.25rem 1.5rem;
+      margin-bottom: 1rem;
+      display: flex;
+      align-items: flex-start;
+      gap: 1rem;
+    }
+
+    .result-icon {
+      width: 40px;
+      height: 40px;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.2rem;
+      flex-shrink: 0;
+      background: #d1fae5;
+    }
+
+    .result-meta h3 {
+      font-size: 1rem;
+      font-weight: 600;
+      color: var(--gray-800);
+    }
+
+    .result-meta p {
+      font-size: .82rem;
+      color: var(--gray-500);
+      margin-top: .25rem;
+    }
+
+    .result-tags {
+      display: flex;
+      gap: .5rem;
+      flex-wrap: wrap;
+      margin-top: .5rem;
+    }
+
+    .tag {
+      background: var(--primary-light);
+      color: var(--primary);
+      border-radius: 20px;
+      padding: .2rem .7rem;
+      font-size: .73rem;
+      font-weight: 600;
+    }
+
+    .tag.green { background: #d1fae5; color: #065f46; }
+    .tag.orange { background: #fef3c7; color: #92400e; }
+    .tag.ai { background: #ede9fe; color: #5b21b6; }
+
+    /* Summary card */
+    .summary-card {
+      background: white;
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 1.75rem;
+      margin-bottom: 1rem;
+    }
+
+    .summary-card h3 {
+      font-size: .8rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      color: var(--gray-400);
+      margin-bottom: 1rem;
+      display: flex;
+      align-items: center;
+      gap: .5rem;
+    }
+
+    .summary-content {
+      font-size: .92rem;
+      line-height: 1.7;
+      color: var(--gray-700);
+    }
+
+    /* Markdown-like rendering */
+    .summary-content strong { font-weight: 600; color: var(--gray-800); }
+    .summary-content em { font-style: italic; }
+
+    .summary-content .md-h2 {
+      font-size: 1rem;
+      font-weight: 700;
+      color: var(--gray-800);
+      margin: 1.25rem 0 .5rem;
+      padding-bottom: .35rem;
+      border-bottom: 2px solid var(--gray-100);
+    }
+
+    .summary-content .md-h3 {
+      font-size: .92rem;
+      font-weight: 600;
+      color: var(--gray-700);
+      margin: 1rem 0 .35rem;
+    }
+
+    .summary-content .md-p { margin-bottom: .75rem; }
+
+    .summary-content .md-ul {
+      list-style: none;
+      margin: .5rem 0 .75rem;
+      padding: 0;
+    }
+
+    .summary-content .md-ul li {
+      padding: .2rem 0 .2rem 1.2rem;
+      position: relative;
+    }
+
+    .summary-content .md-ul li::before {
+      content: "▸";
+      position: absolute;
+      left: 0;
+      color: var(--primary);
+      font-size: .75rem;
+      top: .3rem;
+    }
+
+    .summary-content .md-blockquote {
+      border-left: 3px solid var(--primary);
+      padding: .5rem 1rem;
+      background: var(--primary-light);
+      border-radius: 0 6px 6px 0;
+      color: var(--gray-600);
+      font-size: .87rem;
+      margin: .75rem 0;
+    }
+
+    .disclaimer-box {
+      background: #fffbeb;
+      border: 1px solid #fde68a;
+      border-radius: 8px;
+      padding: .85rem 1rem;
+      font-size: .8rem;
+      color: #92400e;
+      margin-top: 1.25rem;
+      display: flex;
+      gap: .5rem;
+    }
+
+    /* Sources */
+    .sources-card {
+      background: white;
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+      margin-bottom: 1rem;
+    }
+
+    .sources-toggle {
+      padding: 1rem 1.5rem;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      user-select: none;
+      transition: background .1s;
+    }
+
+    .sources-toggle:hover { background: var(--gray-50); }
+
+    .sources-toggle h3 {
+      font-size: .8rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      color: var(--gray-400);
+      display: flex;
+      align-items: center;
+      gap: .5rem;
+    }
+
+    .chevron {
+      transition: transform .2s;
+      color: var(--gray-400);
+    }
+
+    .chevron.open { transform: rotate(180deg); }
+
+    .sources-list {
+      display: none;
+      padding: 0 1.5rem 1.25rem;
+    }
+
+    .sources-list.show { display: block; }
+
+    .source-item {
+      display: flex;
+      align-items: flex-start;
+      gap: .75rem;
+      padding: .75rem 0;
+      border-bottom: 1px solid var(--gray-100);
+    }
+
+    .source-item:last-child { border-bottom: none; }
+
+    .source-icon {
+      width: 32px;
+      height: 32px;
+      border-radius: 6px;
+      background: var(--primary-light);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      font-size: .9rem;
+    }
+
+    .source-info strong {
+      display: block;
+      font-size: .88rem;
+      font-weight: 600;
+      color: var(--gray-800);
+    }
+
+    .source-info span {
+      font-size: .78rem;
+      color: var(--gray-500);
+    }
+
+    /* Error */
+    .error-card {
+      background: #fef2f2;
+      border: 1.5px solid #fecaca;
+      border-radius: var(--radius);
+      padding: 1.25rem 1.5rem;
+      color: #991b1b;
+      font-size: .9rem;
+      display: flex;
+      align-items: flex-start;
+      gap: .75rem;
+      margin-bottom: 1rem;
+    }
+
+    /* Footer */
+    footer {
+      background: white;
+      border-top: 1px solid var(--gray-200);
+      padding: 1rem 2rem;
+      text-align: center;
+      font-size: .75rem;
+      color: var(--gray-400);
+    }
+
+    footer a { color: var(--primary); text-decoration: none; }
+    footer a:hover { text-decoration: underline; }
+
+    /* Animations */
+    @keyframes fadeInUp {
+      from { opacity: 0; transform: translateY(12px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .fade-in { animation: fadeInUp .3s ease forwards; }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="header-inner">
+    <div class="logo-icon">🏛️</div>
+    <div class="header-text">
+      <h1>DSO Omgevingsplan Assistent</h1>
+      <p>Actuele regels en bestemmingen voor elk Nederlands adres</p>
+    </div>
+    <div class="header-badge" id="ai-badge">⚡ Laden...</div>
+  </div>
+</header>
+
+<main>
+  <!-- Query Card -->
+  <div class="query-card">
+    <h2>Stel uw vraag over een locatie</h2>
+    <p class="subtitle">Voer een adres in en stel een vraag over het geldende omgevingsplan of bestemmingsplan.</p>
+
+    <div class="form-grid">
+      <div class="form-group">
+        <label for="adres-input">📍 Adres</label>
+        <div class="autocomplete-wrapper">
+          <input
+            type="text"
+            id="adres-input"
+            placeholder="bijv. Amstel 1, Amsterdam"
+            autocomplete="off"
+          />
+          <div class="autocomplete-list" id="autocomplete-list"></div>
+        </div>
+      </div>
+      <div class="form-group">
+        <label for="vraag-input">❓ Uw vraag</label>
+        <textarea
+          id="vraag-input"
+          rows="2"
+          placeholder="bijv. Wat zijn de bouwmogelijkheden op dit perceel?"
+        ></textarea>
+      </div>
+    </div>
+
+    <div class="quick-questions">
+      <span>Snel:</span>
+      <button class="quick-btn" onclick="setVraag('Wat is de bestemming van dit perceel?')">📋 Bestemming</button>
+      <button class="quick-btn" onclick="setVraag('Wat zijn de bouwmogelijkheden en maximale bouwhoogte op dit perceel?')">🏗️ Bouwmogelijkheden</button>
+      <button class="quick-btn" onclick="setVraag('Zijn er bijzondere gebruiksregels of verboden activiteiten voor dit perceel?')">⚠️ Gebruiksregels</button>
+      <button class="quick-btn" onclick="setVraag('Wat zijn de regels voor het uitbreiden of verbouwen van een woning op dit adres?')">🏠 Verbouwen</button>
+      <button class="quick-btn" onclick="setVraag('Zijn er regels over parkeren of verkeer voor dit perceel?')">🚗 Parkeren</button>
+      <button class="quick-btn" onclick="setVraag('Geef een volledig overzicht van alle geldende regels voor dit adres.')">📄 Volledig overzicht</button>
+    </div>
+
+    <div class="status-bar" id="status-bar">
+      <div class="status-dot"></div>
+      <span id="status-text">Bezig...</span>
+    </div>
+
+    <button class="btn-submit" id="submit-btn" onclick="submitQuery()">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+      Zoeken in omgevingsplan
+    </button>
+  </div>
+
+  <!-- Results Section -->
+  <div id="result-section">
+
+    <div id="result-header-card" class="result-header fade-in">
+      <div class="result-icon">📍</div>
+      <div class="result-meta">
+        <h3 id="result-adres">-</h3>
+        <p id="result-gemeente">-</p>
+        <div class="result-tags" id="result-tags"></div>
+      </div>
+    </div>
+
+    <div class="summary-card fade-in">
+      <h3>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M9 12h6M9 16h6M9 8h6M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/></svg>
+        Analyse &amp; Samenvatting
+      </h3>
+      <div class="summary-content" id="summary-content"></div>
+    </div>
+
+    <div class="sources-card fade-in">
+      <div class="sources-toggle" onclick="toggleSources()">
+        <h3>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+          Geraadpleegde bronnen
+        </h3>
+        <svg class="chevron" id="sources-chevron" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
+      </div>
+      <div class="sources-list" id="sources-list"></div>
+    </div>
+
+  </div>
+
+  <div id="error-section" style="display:none"></div>
+
+</main>
+
+<footer>
+  <p>Data afkomstig van <a href="https://www.omgevingswet.overheid.nl/" target="_blank">DSO – Digitaal Stelsel Omgevingswet</a> &amp; <a href="https://www.ruimtelijkeplannen.nl/" target="_blank">Ruimtelijkeplannen.nl</a>. Altijd de officiële bronnen raadplegen voor juridische zekerheid.</p>
+</footer>
+
+<script>
+  // ─── State ───────────────────────────────────────────────────────────────────
+  let autocompleteTimeout = null;
+  let selectedAdres = null;
+
+  // ─── On load ─────────────────────────────────────────────────────────────────
+  document.addEventListener('DOMContentLoaded', async () => {
+    await checkHealth();
+    document.getElementById('adres-input').addEventListener('input', onAdresInput);
+    document.getElementById('adres-input').addEventListener('keydown', onAdresKeydown);
+    document.getElementById('vraag-input').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && e.ctrlKey) submitQuery();
+    });
+    document.addEventListener('click', (e) => {
+      if (!e.target.closest('.autocomplete-wrapper')) hideAutocomplete();
+    });
+  });
+
+  async function checkHealth() {
+    try {
+      const r = await fetch('/api/health');
+      const d = await r.json();
+      const badge = document.getElementById('ai-badge');
+      if (d.ai_actief) {
+        badge.textContent = `✨ AI actief (${d.ai_model})`;
+        badge.style.background = 'rgba(255,255,255,.2)';
+      } else {
+        badge.textContent = '⚠️ Geen AI-sleutel';
+        badge.style.background = 'rgba(255,180,0,.25)';
+      }
+    } catch {}
+  }
+
+  // ─── Autocomplete ─────────────────────────────────────────────────────────────
+  let activeIndex = -1;
+
+  function onAdresInput(e) {
+    const q = e.target.value.trim();
+    selectedAdres = null;
+    clearTimeout(autocompleteTimeout);
+    if (q.length < 3) { hideAutocomplete(); return; }
+    autocompleteTimeout = setTimeout(() => fetchSuggestions(q), 250);
+  }
+
+  function onAdresKeydown(e) {
+    const list = document.getElementById('autocomplete-list');
+    const items = list.querySelectorAll('.autocomplete-item');
+    if (!list.classList.contains('show')) return;
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      activeIndex = Math.min(activeIndex + 1, items.length - 1);
+      updateActive(items);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      activeIndex = Math.max(activeIndex - 1, 0);
+      updateActive(items);
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (activeIndex >= 0 && items[activeIndex]) {
+        items[activeIndex].click();
+      }
+    } else if (e.key === 'Escape') {
+      hideAutocomplete();
+    }
+  }
+
+  function updateActive(items) {
+    items.forEach((item, i) => item.classList.toggle('active', i === activeIndex));
+    if (items[activeIndex]) {
+      items[activeIndex].scrollIntoView({ block: 'nearest' });
+    }
+  }
+
+  async function fetchSuggestions(q) {
+    try {
+      const r = await fetch(`/api/suggest?q=${encodeURIComponent(q)}`);
+      const data = await r.json();
+      showAutocomplete(data.suggestions || []);
+    } catch {}
+  }
+
+  function showAutocomplete(suggestions) {
+    const list = document.getElementById('autocomplete-list');
+    activeIndex = -1;
+    if (!suggestions.length) { hideAutocomplete(); return; }
+    list.innerHTML = suggestions.map(s => `
+      <div class="autocomplete-item" onclick="selectAdres('${escHtml(s.weergavenaam)}')">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
+        ${escHtml(s.weergavenaam)}
+      </div>
+    `).join('');
+    list.classList.add('show');
+  }
+
+  function selectAdres(adres) {
+    document.getElementById('adres-input').value = adres;
+    selectedAdres = adres;
+    hideAutocomplete();
+  }
+
+  function hideAutocomplete() {
+    document.getElementById('autocomplete-list').classList.remove('show');
+    activeIndex = -1;
+  }
+
+  // ─── Quick questions ──────────────────────────────────────────────────────────
+  function setVraag(text) {
+    document.getElementById('vraag-input').value = text;
+    document.getElementById('vraag-input').focus();
+  }
+
+  // ─── Submit ───────────────────────────────────────────────────────────────────
+  async function submitQuery() {
+    const adres = document.getElementById('adres-input').value.trim();
+    const vraag = document.getElementById('vraag-input').value.trim();
+
+    if (!adres) { alert('Voer een adres in.'); return; }
+    if (!vraag) { alert('Stel een vraag.'); return; }
+
+    setLoading(true);
+    showStatus('Adres opzoeken in PDOK Locatieserver...');
+    clearError();
+
+    try {
+      setTimeout(() => showStatus('Omgevingsplan opvragen bij DSO...'), 1200);
+      setTimeout(() => showStatus('Regels en bestemmingen ophalen...'), 2800);
+      setTimeout(() => showStatus('AI analyseert de planteksten...'), 5000);
+
+      const response = await fetch('/api/query', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ adres, vraag, include_bestemmingsplan: true }),
+      });
+
+      if (!response.ok) {
+        const err = await response.json();
+        throw new Error(err.detail || `HTTP ${response.status}`);
+      }
+
+      const data = await response.json();
+      showResults(data, vraag);
+
+    } catch (e) {
+      showError(e.message);
+    } finally {
+      setLoading(false);
+      hideStatus();
+    }
+  }
+
+  // ─── Results ──────────────────────────────────────────────────────────────────
+  function showResults(data, vraag) {
+    document.getElementById('result-section').style.display = 'block';
+    document.getElementById('result-section').scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+    document.getElementById('result-adres').textContent = data.adres;
+    document.getElementById('result-gemeente').textContent =
+      `Gemeente ${data.gemeente} • Vraag: "${vraag}"`;
+
+    const tagsEl = document.getElementById('result-tags');
+    tagsEl.innerHTML = '';
+    if (data.bestemming) {
+      const t = document.createElement('span');
+      t.className = 'tag green';
+      t.textContent = '🏠 ' + data.bestemming;
+      tagsEl.appendChild(t);
+    }
+    if (data.heeft_bestemmingsplan) {
+      const t = document.createElement('span');
+      t.className = 'tag orange';
+      t.textContent = '✓ Bestemmingsplan';
+      tagsEl.appendChild(t);
+    }
+    if (data.heeft_omgevingsplan) {
+      const t = document.createElement('span');
+      t.className = 'tag';
+      t.style.background = 'var(--primary-light)';
+      t.style.color = 'var(--primary)';
+      t.textContent = '✓ Omgevingsplan';
+      tagsEl.appendChild(t);
+    }
+    if (data.ai_gebruikt) {
+      const t = document.createElement('span');
+      t.className = 'tag ai';
+      t.textContent = '✨ AI-samenvatting';
+      tagsEl.appendChild(t);
+    }
+
+    document.getElementById('summary-content').innerHTML = renderMarkdown(data.samenvatting);
+
+    const sourcesList = document.getElementById('sources-list');
+    if (data.bronnen && data.bronnen.length) {
+      sourcesList.innerHTML = data.bronnen.map(b => {
+        const icon = b.type === 'omgevingsplan' ? '🏛️' : '📋';
+        const linkHtml = b.url
+          ? `<a href="${escHtml(b.url)}" target="_blank" style="font-size:.8rem;color:var(--primary);display:block;margin-top:.2rem">Bekijk plantekst →</a>`
+          : '';
+        return `
+          <div class="source-item">
+            <div class="source-icon">${icon}</div>
+            <div class="source-info">
+              <strong>${escHtml(b.naam)}</strong>
+              <span>${escHtml(b.bron)}${b.datum ? ' • ' + escHtml(b.datum) : ''}</span>
+              ${linkHtml}
+            </div>
+          </div>`;
+      }).join('');
+    } else {
+      sourcesList.innerHTML = '<p style="color:var(--gray-500);font-size:.85rem;padding:.5rem 0">Geen bronnen beschikbaar</p>';
+    }
+  }
+
+  function toggleSources() {
+    const list = document.getElementById('sources-list');
+    const chevron = document.getElementById('sources-chevron');
+    list.classList.toggle('show');
+    chevron.classList.toggle('open');
+  }
+
+  // ─── Markdown renderer ────────────────────────────────────────────────────────
+  function renderMarkdown(text) {
+    if (!text) return '';
+
+    const lines = text.split('\n');
+    let html = '';
+    let inList = false;
+
+    for (let i = 0; i < lines.length; i++) {
+      let line = lines[i];
+
+      line = line
+        .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+        .replace(/\*(.+?)\*/g, '<em>$1</em>')
+        .replace(/`(.+?)`/g, '<code style="background:var(--gray-100);padding:.1em .3em;border-radius:3px;font-size:.87em">$1</code>');
+
+      if (/^## (.+)/.test(line)) {
+        if (inList) { html += '</ul>'; inList = false; }
+        html += `<div class="md-h2">${line.replace(/^## /, '')}</div>`;
+      } else if (/^### (.+)/.test(line)) {
+        if (inList) { html += '</ul>'; inList = false; }
+        html += `<div class="md-h3">${line.replace(/^### /, '')}</div>`;
+      } else if (/^> (.+)/.test(line)) {
+        if (inList) { html += '</ul>'; inList = false; }
+        html += `<div class="md-blockquote">${line.replace(/^> /, '')}</div>`;
+      } else if (/^[-*•] (.+)/.test(line)) {
+        if (!inList) { html += '<ul class="md-ul">'; inList = true; }
+        html += `<li>${line.replace(/^[-*•] /, '')}</li>`;
+      } else if (/^\d+\. (.+)/.test(line)) {
+        if (!inList) { html += '<ul class="md-ul">'; inList = true; }
+        html += `<li>${line.replace(/^\d+\. /, '')}</li>`;
+      } else if (line.trim() === '' || line.startsWith('---')) {
+        if (inList) { html += '</ul>'; inList = false; }
+        if (line.trim() !== '---') html += '<br>';
+      } else {
+        if (inList) { html += '</ul>'; inList = false; }
+        if (line.trim()) html += `<p class="md-p">${line}</p>`;
+      }
+    }
+
+    if (inList) html += '</ul>';
+    return html;
+  }
+
+  // ─── UI helpers ───────────────────────────────────────────────────────────────
+  function setLoading(loading) {
+    const btn = document.getElementById('submit-btn');
+    if (loading) {
+      btn.disabled = true;
+      btn.innerHTML = '<div class="spinner"></div> Bezig met zoeken...';
+    } else {
+      btn.disabled = false;
+      btn.innerHTML = `
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+        Zoeken in omgevingsplan`;
+    }
+  }
+
+  function showStatus(text) {
+    const bar = document.getElementById('status-bar');
+    document.getElementById('status-text').textContent = text;
+    bar.classList.add('show');
+  }
+
+  function hideStatus() {
+    document.getElementById('status-bar').classList.remove('show');
+  }
+
+  function showError(msg) {
+    const sec = document.getElementById('error-section');
+    sec.style.display = 'block';
+    sec.innerHTML = `
+      <div class="error-card fade-in">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="flex-shrink:0;margin-top:1px"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+        <div>
+          <strong>Er is een fout opgetreden</strong><br>
+          <span style="font-size:.85rem">${escHtml(msg)}</span>
+        </div>
+      </div>`;
+    document.getElementById('result-section').style.display = 'none';
+  }
+
+  function clearError() {
+    document.getElementById('error-section').style.display = 'none';
+    document.getElementById('error-section').innerHTML = '';
+  }
+
+  function escHtml(str) {
+    return String(str || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+</script>
+
+</body>
+</html>
