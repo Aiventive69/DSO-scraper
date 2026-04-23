@@ -45,7 +45,35 @@ def _parse_wms_text(text: str) -> Optional[Dict]:
     return props if props else None
 
 
-async def _fetch_layer(client: httpx.AsyncClient, layer: str, bbox: str) -> Tuple[str, Optional[Dict]]:
+def _parse_wms_text_multi(text: str) -> List[Dict]:
+    """
+    Parse a WMS GetFeatureInfo plain-text response that may contain
+    multiple features (when FEATURE_COUNT > 1).
+    Returns a list of property dicts, one per feature.
+    """
+    if not text or "no results" in text.lower() or "Search returned no results" in text:
+        return []
+    features = []
+    current: Dict = {}
+    for line in text.splitlines():
+        # New feature block
+        if re.match(r"\s*Feature \d+:", line):
+            if current:
+                features.append(current)
+            current = {}
+            continue
+        m = re.match(r"\s+(\w[\w\s\-]+?)\s+=\s+'?([^']*)'?\s*$", line)
+        if m:
+            key = m.group(1).strip()
+            val = m.group(2).strip()
+            if val:
+                current[key] = val
+    if current:
+        features.append(current)
+    return features
+
+
+async def _fetch_layer(client: httpx.AsyncClient, layer: str, bbox: str, feature_count: int = 1) -> Tuple[str, Optional[Dict]]:
     """Fetch a single WMS layer (used for parallel execution)."""
     try:
         r = await client.get(PDOK_WMS, params={
@@ -62,6 +90,7 @@ async def _fetch_layer(client: httpx.AsyncClient, layer: str, bbox: str) -> Tupl
             "BBOX": bbox,
             "I": "128",
             "J": "128",
+            "FEATURE_COUNT": str(feature_count),
         })
         r.raise_for_status()
         props = _parse_wms_text(r.text)
@@ -73,20 +102,62 @@ async def _fetch_layer(client: httpx.AsyncClient, layer: str, bbox: str) -> Tupl
         return layer, None
 
 
-async def get_bestemmingsplan_features(x_rd: float, y_rd: float) -> Dict[str, Optional[Dict]]:
+async def _fetch_layer_multi(client: httpx.AsyncClient, layer: str, bbox: str, feature_count: int = 10) -> Tuple[str, List[Dict]]:
+    """Fetch a WMS layer and return ALL matching features (for maatvoering etc.)."""
+    try:
+        r = await client.get(PDOK_WMS, params={
+            "SERVICE": "WMS",
+            "VERSION": "1.3.0",
+            "REQUEST": "GetFeatureInfo",
+            "LAYERS": layer,
+            "QUERY_LAYERS": layer,
+            "FORMAT": "image/png",
+            "INFO_FORMAT": "text/plain",
+            "WIDTH": "256",
+            "HEIGHT": "256",
+            "CRS": "EPSG:28992",
+            "BBOX": bbox,
+            "I": "128",
+            "J": "128",
+            "FEATURE_COUNT": str(feature_count),
+        })
+        r.raise_for_status()
+        feats = _parse_wms_text_multi(r.text)
+        logger.info(f"WMS {layer} (multi): {len(feats)} features")
+        return layer, feats
+    except Exception as e:
+        logger.warning(f"WMS layer {layer} (multi) error: {e}")
+        return layer, []
+
+
+async def get_bestemmingsplan_features(x_rd: float, y_rd: float) -> Dict:
     """
     Query all relevant WMS layers for the given RD coordinate (in parallel).
-    Returns a dict keyed by layer name containing parsed feature properties.
+    Returns a dict keyed by layer name.
+    Layers that can have multiple overlapping features (maatvoering, bouwaanduiding,
+    gebiedsaanduiding) return a list; others return a single dict or None.
     """
     import asyncio
     delta = 500  # 500m bounding box
     bbox = f"{x_rd - delta},{y_rd - delta},{x_rd + delta},{y_rd + delta}"
 
-    async with httpx.AsyncClient(timeout=20) as client:
-        tasks = [_fetch_layer(client, layer, bbox) for layer, _ in LAYERS]
-        pairs = await asyncio.gather(*tasks)
+    # Layers that return a single feature
+    single_layers = ["plangebied", "enkelbestemming", "dubbelbestemming", "bouwvlak", "functieaanduiding"]
+    # Layers where multiple overlapping features are common
+    multi_layers = ["maatvoering", "bouwaanduiding", "gebiedsaanduiding"]
 
-    return dict(pairs)
+    async with httpx.AsyncClient(timeout=20) as client:
+        single_tasks = [_fetch_layer(client, layer, bbox) for layer in single_layers]
+        multi_tasks = [_fetch_layer_multi(client, layer, bbox) for layer in multi_layers]
+        single_results = await asyncio.gather(*single_tasks)
+        multi_results = await asyncio.gather(*multi_tasks)
+
+    result: Dict = {}
+    for layer_name, props in single_results:
+        result[layer_name] = props
+    for layer_name, props_list in multi_results:
+        result[layer_name] = props_list
+    return result
 
 
 async def fetch_full_plan_text(url: str) -> str:
@@ -141,10 +212,10 @@ async def fetch_plan_text(url: str, anchor: Optional[str] = None) -> str:
     """
     Fetch HTML plan text from ruimtelijkeplannen.nl and return the
     relevant section as clean plain text.
-    If anchor is provided, only the section starting at that anchor is returned.
+    If anchor is provided, extract the full article section for that anchor.
     """
     try:
-        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
             r = await client.get(url)
             r.raise_for_status()
     except Exception as e:
@@ -152,22 +223,44 @@ async def fetch_plan_text(url: str, anchor: Optional[str] = None) -> str:
         return ""
 
     soup = BeautifulSoup(r.text, "html.parser")
+    for tag in soup(["script", "style", "nav", "header", "footer"]):
+        tag.decompose()
 
     if anchor:
-        start = soup.find(id=anchor) or soup.find("a", {"name": anchor})
-        if start:
-            parts = []
-            el = start
+        # Find the anchor element (id or <a name="...">)
+        start_el = soup.find(id=anchor) or soup.find("a", {"name": anchor})
+        if start_el:
+            # Walk upward to find the container (div/section/article) for this anchor
+            container = start_el
+            for _ in range(5):
+                parent = container.parent
+                if parent and parent.name in ("div", "section", "article", "li"):
+                    container = parent
+                else:
+                    break
+
+            parts = [container.get_text(separator="\n", strip=True)]
+
+            # Also collect following siblings until the next top-level article heading
+            el = container.find_next_sibling()
             count = 0
-            while el and count < 80:
-                txt = el.get_text(separator=" ", strip=True)
-                if txt:
-                    parts.append(txt)
+            while el and count < 150:
+                tag_name = el.name or ""
+                text = el.get_text(separator="\n", strip=True)
+                # Stop at a same-level or higher article heading (h2/h3 sibling that isn't an anchor)
+                if tag_name in ("h1", "h2") and count > 0:
+                    break
+                if tag_name == "h3" and count > 5 and text and re.match(r"^(Artikel|Hoofdstuk|Afdeling)\s+\d", text):
+                    break
+                if text:
+                    parts.append(text)
                 el = el.find_next_sibling()
                 count += 1
-                if el and el.name in ("h1", "h2") and count > 3:
-                    break
-            return " ".join(parts)
+
+            text = "\n\n".join(parts)
+            text = re.sub(r"\n{3,}", "\n\n", text)
+            logger.info(f"Anchor-tekst '{anchor}': {len(text)} tekens")
+            return text.strip()
 
     return soup.get_text(separator="\n", strip=True)
 
@@ -213,7 +306,11 @@ def _pick_regels_url(links: List[str]) -> Optional[str]:
 async def get_bestemmingsplan_data(x_rd: float, y_rd: float) -> Dict:
     """
     Full pipeline: WMS feature info + plan text fetching (all in parallel).
-    Returns a structured dict with all relevant plan information.
+
+    Fetching strategy:
+    - Specifieke bestemmingsartikel via anchor URL → bevat kap/bouwregels voor DEZE bestemming
+    - Volledig regelsdocument (eerste deel) → bevat algemene regels, parkeren, gebruik etc.
+    Both are stored separately so the LLM always gets the focused article text.
     """
     import asyncio
 
@@ -227,7 +324,8 @@ async def get_bestemmingsplan_data(x_rd: float, y_rd: float) -> Dict:
         "plan_links": [],
         "bestemming": None,
         "bestemming_url": None,
-        "volledige_regels_tekst": "",
+        "bestemming_artikel_tekst": "",   # Specific bestemming article (via anchor)
+        "algemene_regels_tekst": "",       # Full document text for general provisions
         "dubbelbestemmingen": [],
         "gebiedsaanduidingen": [],
         "functieaanduidingen": [],
@@ -250,58 +348,102 @@ async def get_bestemmingsplan_data(x_rd: float, y_rd: float) -> Dict:
     # --- Bouwvlak ---
     result["bouwvlak"] = features.get("bouwvlak") is not None
 
-    # --- Maatvoering ---
-    mv = features.get("maatvoering")
-    if mv:
+    # --- Maatvoering (multi-feature list) ---
+    mv_list = features.get("maatvoering") or []
+    if isinstance(mv_list, dict):
+        mv_list = [mv_list]
+    for mv in mv_list:
         mv_str = _extract_maatvoering(mv)
         if mv_str:
             result["maatvoering"].append(mv_str)
 
     # --- Functieaanduiding ---
     fa = features.get("functieaanduiding")
+    if isinstance(fa, list):
+        fa = fa[0] if fa else None
     if fa and fa.get("naam"):
         result["functieaanduidingen"].append(fa["naam"])
 
-    # --- Bouwaanduiding ---
-    ba = features.get("bouwaanduiding")
-    if ba and ba.get("naam"):
-        result["bouwaanduidingen"].append(ba["naam"])
+    # --- Bouwaanduiding (multi-feature list) ---
+    ba_list = features.get("bouwaanduiding") or []
+    if isinstance(ba_list, dict):
+        ba_list = [ba_list]
+    for ba in ba_list:
+        if ba.get("naam"):
+            result["bouwaanduidingen"].append(ba["naam"])
 
-    # --- Enkelbestemming / Dubbelbestemming / Gebiedsaanduiding namen ---
+    # --- Enkelbestemming / Dubbelbestemming / Gebiedsaanduiding ---
     eb = features.get("enkelbestemming")
+    bestemming_anchor_url = None
     if eb:
         result["bestemming"] = eb.get("naam")
         url_raw = eb.get("verwijzingnaartekst", "")
         if url_raw:
-            result["bestemming_url"] = url_raw.strip().split("#")[0]
+            full_url = url_raw.strip()
+            base_url = full_url.split("#")[0]
+            result["bestemming_url"] = base_url
+            # Keep the full anchor URL for precise article fetching
+            bestemming_anchor_url = full_url if "#" in full_url else None
 
     db = features.get("dubbelbestemming")
+    if isinstance(db, list):
+        db = db[0] if db else None
     if db and db.get("naam"):
         result["dubbelbestemmingen"].append(db["naam"])
 
-    ga = features.get("gebiedsaanduiding")
-    if ga and ga.get("naam"):
-        result["gebiedsaanduidingen"].append(ga["naam"])
+    # --- Gebiedsaanduiding (multi-feature list) ---
+    ga_list = features.get("gebiedsaanduiding") or []
+    if isinstance(ga_list, dict):
+        ga_list = [ga_list]
+    for ga in ga_list:
+        if ga.get("naam"):
+            result["gebiedsaanduidingen"].append(ga["naam"])
 
-    # --- Haal het VOLLEDIGE regelsdocument op ---
-    # Prioriteit: r_ (HTML regels, IMRO2012) → v_ (PDF voorschriften, IMRO2008) → t_ (toelichting)
+    # --- Fetch plan texts in parallel ---
+    # 1. Article-specific text (via anchor) → always contains kap/bouw rules for THIS bestemming
+    # 2. Full document (for general rules like parking, permitted use, etc.)
     regels_url = _pick_regels_url(result["plan_links"])
 
+    fetch_tasks = []
+    task_keys: List[str] = []
+
+    if bestemming_anchor_url:
+        base, anchor = _extract_anchor_from_url(bestemming_anchor_url)
+        fetch_tasks.append(fetch_plan_text(base, anchor))
+        task_keys.append("artikel")
+
     if regels_url:
-        logger.info(f"Ophalen regelsdocument: {regels_url}")
-        result["volledige_regels_tekst"] = await fetch_full_plan_text(regels_url)
-        logger.info(f"Regelsdocument: {len(result['volledige_regels_tekst'])} tekens")
+        fetch_tasks.append(fetch_full_plan_text(regels_url))
+        task_keys.append("volledig")
     elif result.get("bestemming_url"):
-        logger.info(f"Geen regelsdocument gevonden, fallback naar bestemming URL")
-        result["volledige_regels_tekst"] = await fetch_full_plan_text(
-            result["bestemming_url"].split("#")[0]
-        )
+        fetch_tasks.append(fetch_full_plan_text(result["bestemming_url"]))
+        task_keys.append("volledig")
+
+    if fetch_tasks:
+        texts = await asyncio.gather(*fetch_tasks)
+        for key, tekst in zip(task_keys, texts):
+            if key == "artikel":
+                result["bestemming_artikel_tekst"] = tekst
+                logger.info(f"Bestemmingsartikel: {len(tekst)} tekens")
+            elif key == "volledig":
+                result["algemene_regels_tekst"] = tekst
+                logger.info(f"Volledig document: {len(tekst)} tekens")
 
     return result
 
 
 def format_bestemmingsplan_for_llm(data: Dict) -> str:
-    """Format the retrieved bestemmingsplan data as plain text for the LLM."""
+    """
+    Format bestemmingsplan data for the LLM.
+
+    Layout (priority order):
+    1. Metadata + perceel-specifieke kenmerken (WMS attributes)
+    2. VOLLEDIG bestemmingsartikel voor deze bestemming (via anchor) — altijd volledig
+    3. Overige planregels / algemene bepalingen (eerste N tekens van volledig document)
+
+    This ensures kap/bouwregels from the specific article are ALWAYS present,
+    even if the article appears late in a large document.
+    """
     lines: List[str] = []
 
     # Metadata header
@@ -315,13 +457,13 @@ def format_bestemmingsplan_for_llm(data: Dict) -> str:
             lines.append(f"Status: {data['plan_status']}")
         lines.append("")
 
-    # Perceel-specifieke kenmerken
+    # Perceel-specifieke kenmerken (from WMS map attributes)
     if data.get("bestemming"):
-        lines.append(f"Bestemming op dit perceel: {data['bestemming']}")
+        lines.append(f"**Bestemming op dit perceel: {data['bestemming']}**")
     if data.get("bouwvlak"):
         lines.append("Bouwvlak aanwezig: ja")
     if data.get("maatvoering"):
-        lines.append(f"Maatvoering: {'; '.join(data['maatvoering'])}")
+        lines.append(f"Maatvoering (kaart): {'; '.join(data['maatvoering'])}")
     if data.get("dubbelbestemmingen"):
         lines.append(f"Dubbelbestemming(en): {', '.join(data['dubbelbestemmingen'])}")
     if data.get("gebiedsaanduidingen"):
@@ -332,9 +474,22 @@ def format_bestemmingsplan_for_llm(data: Dict) -> str:
         lines.append(f"Bouwaanduiding(en): {', '.join(data['bouwaanduidingen'])}")
     lines.append("")
 
-    # Volledige regelstekst
-    if data.get("volledige_regels_tekst"):
+    # Specific bestemming article (via anchor URL — contains all rules for this bestemming)
+    artikel_tekst = data.get("bestemming_artikel_tekst", "").strip()
+    if artikel_tekst:
+        lines.append(f"## Bestemmingsartikel: {data.get('bestemming', 'bestemming')}")
+        lines.append(artikel_tekst)
+        lines.append("")
+
+    # Full document text — no truncation needed; the summarizer handles chunking
+    algemeen_tekst = data.get("algemene_regels_tekst", "").strip()
+    if algemeen_tekst:
         lines.append("## Volledige planregels")
-        lines.append(data["volledige_regels_tekst"])
+        lines.append(algemeen_tekst)
+    elif not artikel_tekst:
+        legacy = data.get("volledige_regels_tekst", "").strip()
+        if legacy:
+            lines.append("## Planregels")
+            lines.append(legacy)
 
     return "\n".join(lines)

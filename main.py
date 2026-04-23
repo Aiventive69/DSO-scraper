@@ -69,6 +69,7 @@ class QueryResponse(BaseModel):
     heeft_bestemmingsplan: bool
     ai_gebruikt: bool
     bronnen: list
+    geocode_waarschuwing: Optional[str] = None
 
 
 @app.get("/", include_in_schema=False)
@@ -102,9 +103,24 @@ async def query_omgevingsplan(req: QueryRequest):
             detail=f"Adres '{req.adres}' niet gevonden. Controleer het adres en probeer opnieuw.",
         )
 
-    logger.info(f"Geocoded: {coords['adres_display']} -> RD({coords['x_rd']}, {coords['y_rd']})")
+    logger.info(
+        f"Geocoded: {coords['adres_display']} (type={coords.get('geocode_type','?')}) "
+        f"-> RD({coords['x_rd']}, {coords['y_rd']})"
+    )
+
+    # Warn when we only found a street, not an exact address
+    geocode_waarschuwing = None
+    if not coords.get("is_exact_adres", True):
+        geocode_waarschuwing = (
+            f"⚠️ Geen exact adres gevonden voor '{req.adres}'. "
+            f"Resultaten zijn gebaseerd op de straat: **{coords['adres_display']}**. "
+            f"Voeg een huisnummer toe voor perceel-specifieke informatie."
+        )
+        logger.warning(f"Straat-niveau geocoding: {coords['adres_display']}")
 
     all_plan_texts = []
+    if geocode_waarschuwing:
+        all_plan_texts.append(geocode_waarschuwing)
     bronnen = []
     omgevingsplan_naam = None
     bestemmingsplan_naam = None
@@ -276,6 +292,7 @@ async def query_omgevingsplan(req: QueryRequest):
         heeft_bestemmingsplan=heeft_bestemmingsplan,
         ai_gebruikt=ai_gebruikt,
         bronnen=bronnen,
+        geocode_waarschuwing=geocode_waarschuwing,
     )
 
 

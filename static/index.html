@@ -614,7 +614,7 @@
           <input
             type="text"
             id="adres-input"
-            placeholder="bijv. Amstel 1, Amsterdam"
+            placeholder="bijv. Korte Jufferstraat 12, Utrecht"
             autocomplete="off"
           />
           <div class="autocomplete-list" id="autocomplete-list"></div>
@@ -653,6 +653,11 @@
 
   <!-- Results Section -->
   <div id="result-section">
+
+    <div id="geocode-warning" style="display:none;background:#fffbeb;border:1px solid #fde68a;border-radius:10px;padding:.85rem 1.1rem;margin-bottom:1rem;font-size:.85rem;color:#92400e;display:none;align-items:center;gap:.6rem" class="fade-in">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="flex-shrink:0"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+      <span id="geocode-warning-text"></span>
+    </div>
 
     <div id="result-header-card" class="result-header fade-in">
       <div class="result-icon">📍</div>
@@ -846,6 +851,15 @@
   function showResults(data, vraag) {
     document.getElementById('result-section').style.display = 'block';
     document.getElementById('result-section').scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+    // Geocode warning (no house number / street-level only)
+    const warnEl = document.getElementById('geocode-warning');
+    if (data.geocode_waarschuwing) {
+      document.getElementById('geocode-warning-text').innerHTML = renderMarkdown(data.geocode_waarschuwing);
+      warnEl.style.display = 'flex';
+    } else {
+      warnEl.style.display = 'none';
+    }
 
     document.getElementById('result-adres').textContent = data.adres;
     document.getElementById('result-gemeente').textContent =
