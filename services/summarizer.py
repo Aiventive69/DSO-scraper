@@ -10,11 +10,15 @@ Strategy for large documents:
 """
 
 import asyncio
-from openai import AsyncOpenAI
+import logging
+from openai import AsyncOpenAI, RateLimitError
 from typing import Optional, List
+
+logger = logging.getLogger(__name__)
 
 CHUNK_SIZE = 80_000    # chars per chunk sent to GPT
 CHUNK_OVERLAP = 1_000  # overlap between chunks to avoid cutting mid-sentence
+MAX_CONCURRENT = 3     # max parallel OpenAI calls (prevents TPM rate limit burst)
 
 SYSTEM_PROMPT = """Je bent een expert assistent voor Nederlandse makelaars en vastgoedprofessionals.
 Je analyseert bestemmingsplan- en omgevingsplanteksten en beantwoordt daar gerichte vragen over.
@@ -70,8 +74,25 @@ def _split_into_chunks(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = C
     return chunks
 
 
+async def _call_openai_with_retry(client: AsyncOpenAI, **kwargs) -> str:
+    """Call OpenAI with automatic retry on 429 rate limit errors."""
+    max_retries = 4
+    delay = 2.0
+    for attempt in range(max_retries):
+        try:
+            response = await client.chat.completions.create(**kwargs)
+            return response.choices[0].message.content or ""
+        except RateLimitError as e:
+            if attempt == max_retries - 1:
+                raise
+            logger.warning(f"Rate limit (429), wacht {delay:.0f}s en probeer opnieuw... (poging {attempt + 1}/{max_retries})")
+            await asyncio.sleep(delay)
+            delay *= 2  # exponential backoff: 2s, 4s, 8s
+
+
 async def _extract_from_chunk(
     client: AsyncOpenAI,
+    semaphore: asyncio.Semaphore,
     chunk: str,
     chunk_index: int,
     total_chunks: int,
@@ -79,7 +100,7 @@ async def _extract_from_chunk(
     adres: str,
     model: str,
 ) -> str:
-    """Ask GPT to extract relevant content from a single chunk."""
+    """Ask GPT to extract relevant content from a single chunk (rate-limited)."""
     user_message = (
         f"Adres: {adres}\n"
         f"Vraag: {vraag}\n\n"
@@ -88,20 +109,23 @@ async def _extract_from_chunk(
         f"--- EINDE DEEL ---\n\n"
         f"Extraheer alle tekst uit dit deel die relevant is voor de vraag."
     )
-    response = await client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": CHUNK_EXTRACT_PROMPT},
-            {"role": "user", "content": user_message},
-        ],
-        temperature=0.0,
-        max_tokens=1500,
-    )
-    return response.choices[0].message.content or "GEEN RELEVANTE INFO IN DIT DEEL."
+    async with semaphore:
+        result = await _call_openai_with_retry(
+            client,
+            model=model,
+            messages=[
+                {"role": "system", "content": CHUNK_EXTRACT_PROMPT},
+                {"role": "user", "content": user_message},
+            ],
+            temperature=0.0,
+            max_tokens=1500,
+        )
+    return result or "GEEN RELEVANTE INFO IN DIT DEEL."
 
 
 async def _synthesize(
     client: AsyncOpenAI,
+    semaphore: asyncio.Semaphore,
     extracts: List[str],
     vraag: str,
     adres: str,
@@ -128,16 +152,18 @@ async def _synthesize(
         f"Geef nu één volledig antwoord op de vraag."
     )
 
-    response = await client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": SYNTHESIZE_PROMPT},
-            {"role": "user", "content": user_message},
-        ],
-        temperature=0.1,
-        max_tokens=2500,
-    )
-    return response.choices[0].message.content or "Geen antwoord ontvangen."
+    async with semaphore:
+        result = await _call_openai_with_retry(
+            client,
+            model=model,
+            messages=[
+                {"role": "system", "content": SYNTHESIZE_PROMPT},
+                {"role": "user", "content": user_message},
+            ],
+            temperature=0.1,
+            max_tokens=2500,
+        )
+    return result or "Geen antwoord ontvangen."
 
 
 async def summarize_with_openai(
@@ -162,6 +188,8 @@ async def summarize_with_openai(
     client = AsyncOpenAI(api_key=api_key)
     chunks = _split_into_chunks(plan_text)
 
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT)
+
     if len(chunks) == 1:
         # Fast path: fits in a single call
         user_message = (
@@ -170,25 +198,27 @@ async def summarize_with_openai(
             f"--- PLANTEKST ---\n{plan_text}\n--- EINDE PLANTEKST ---\n\n"
             f"Beantwoord de vraag op basis van bovenstaande plantekst."
         )
-        response = await client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_message},
-            ],
-            temperature=0.1,
-            max_tokens=2500,
-        )
-        return response.choices[0].message.content or "Geen antwoord ontvangen."
+        async with semaphore:
+            return await _call_openai_with_retry(
+                client,
+                model=model,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": user_message},
+                ],
+                temperature=0.1,
+                max_tokens=2500,
+            ) or "Geen antwoord ontvangen."
 
-    # Multi-chunk path: parallel extraction + synthesis
+    # Multi-chunk path: max MAX_CONCURRENT parallel extractions + synthesis
+    logger.info(f"Verwerking in {len(chunks)} chunks (max {MAX_CONCURRENT} parallel)")
     total = len(chunks)
     extract_tasks = [
-        _extract_from_chunk(client, chunk, i, total, vraag, adres, model)
+        _extract_from_chunk(client, semaphore, chunk, i, total, vraag, adres, model)
         for i, chunk in enumerate(chunks)
     ]
     extracts = await asyncio.gather(*extract_tasks)
-    return await _synthesize(client, list(extracts), vraag, adres, model)
+    return await _synthesize(client, semaphore, list(extracts), vraag, adres, model)
 
 
 def format_without_ai(
