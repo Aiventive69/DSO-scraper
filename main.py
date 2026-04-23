@@ -24,7 +24,7 @@ from services.dso_client import (
 from services.wms_client import get_bestemmingsplan_data, format_bestemmingsplan_for_llm
 from services.summarizer import summarize_with_openai, format_without_ai
 
-load_dotenv(override=True)
+load_dotenv()  # Laad .env lokaal; Render-env vars worden nooit overschreven
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -32,6 +32,12 @@ DSO_API_KEY = os.getenv("DSO_API_KEY", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 DSO_PRODUCTION = os.getenv("DSO_PRODUCTION", "").lower() in ("true", "1", "yes")
+
+# Log key presence (never log the actual value)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+logger.info(f"OPENAI_API_KEY aanwezig: {bool(OPENAI_API_KEY)}")
+logger.info(f"DSO_API_KEY aanwezig: {bool(DSO_API_KEY)}")
 
 
 @asynccontextmanager
