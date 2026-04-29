@@ -37,6 +37,18 @@ Instructies:
   2) Als "GEEN ZEKERE PERCEEL-SPECIFIEKE ENKELBESTEMMING GEVONDEN" aanwezig is, zeg dat expliciet en geef alleen algemene omgevingsregels.
   3) Gebruik secundaire contextbronnen alleen aanvullend, niet als primaire grondslag voor bestemming op perceel.
 
+Outputformat (verplicht):
+1) Begin met: "Status: Perceel-specifiek bevestigd" OF "Status: Alleen algemene locatiecontext".
+2) Daarna: "Bestemming: <naam> (Artikel X[.Y])".
+3) Sectie "Toegestaan gebruik op dit perceel":
+   - alleen concrete toegestane doeleinden met artikel/lid bron
+4) Sectie "Beperkingen / aandachtspunten":
+   - beperkingen, voorwaarden, uitzonderingen met artikel/lid bron
+5) Sectie "Aanvullende regimes":
+   - dubbelbestemming/gebiedsaanduiding alleen als relevant
+6) Vermijd vage taal zoals "zijn mogelijk"; schrijf altijd "van toepassing" of "niet bevestigd voor dit perceel".
+7) Als een detail niet hard uit de tekst volgt, schrijf: "Niet bevestigd in aangeleverde perceelregels".
+
 Als de vraag gaat over de bestemming van een perceel, geef dan ALTIJD:
 1. De naam van de bestemming en het artikelnummer
 2. Een beknopte samenvatting van wat die bestemming toestaat (bestemmingsomschrijving)
@@ -73,6 +85,12 @@ Combineer deze tot één volledig, samenhangend antwoord op de vraag.
 - Geen inleiding, geen herhaling van de vraag — ga direct naar het antwoord
 - Benoem expliciet als gemeentelijke bronnen nodig zijn voor definitieve zekerheid
 - Als perceel-specifieke regels ontbreken, zeg dat expliciet en label je antwoord als algemene context voor de locatie
+- Volg exact dit format:
+  Status
+  Bestemming
+  Toegestaan gebruik op dit perceel
+  Beperkingen / aandachtspunten
+  Aanvullende regimes
 Sluit af met één zin disclaimer over juridische zekerheid."""
 
 
