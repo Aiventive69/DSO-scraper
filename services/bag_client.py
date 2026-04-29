@@ -4,8 +4,9 @@ Provides robust object-identification context for an address.
 """
 
 import logging
+import math
 import re
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, List, Any
 
 import httpx
 
@@ -82,7 +83,7 @@ async def fetch_bag_context(adres_display: str, bag_api_key: str) -> Dict:
         return {}
 
     best = items[0]
-    return {
+    bag_data = {
         "openbare_ruimte": best.get("openbareRuimteNaam", ""),
         "huisnummer": best.get("huisnummer"),
         "huisletter": best.get("huisletter"),
@@ -95,6 +96,115 @@ async def fetch_bag_context(adres_display: str, bag_api_key: str) -> Dict:
         "adresregel5": best.get("adresregel5", ""),
         "adresregel6": best.get("adresregel6", ""),
     }
+    bag_data["rd_points"] = await _fetch_pand_sampling_points(
+        pand_ids=bag_data["pand_ids"],
+        bag_api_key=bag_api_key,
+    )
+    return bag_data
+
+
+def _find_coordinates_recursive(obj: Any) -> Optional[List]:
+    """Find first GeoJSON-like coordinates list in nested object."""
+    if isinstance(obj, dict):
+        if "coordinates" in obj and isinstance(obj["coordinates"], list):
+            return obj["coordinates"]
+        for v in obj.values():
+            found = _find_coordinates_recursive(v)
+            if found is not None:
+                return found
+    elif isinstance(obj, list):
+        for v in obj:
+            found = _find_coordinates_recursive(v)
+            if found is not None:
+                return found
+    return None
+
+
+def _flatten_ring_points(coords: List) -> List[Tuple[float, float]]:
+    """
+    Convert likely polygon/multipolygon coordinates to a flat list of (x,y) points.
+    Supports:
+    - Polygon: [[[x,y], ...]]
+    - MultiPolygon: [[[[x,y], ...]], ...]
+    """
+    points: List[Tuple[float, float]] = []
+    if not coords:
+        return points
+    # Polygon outer ring
+    if isinstance(coords[0], list) and coords and coords[0] and isinstance(coords[0][0], (int, float)):
+        # LineString style
+        for p in coords:
+            if isinstance(p, list) and len(p) >= 2:
+                points.append((float(p[0]), float(p[1])))
+        return points
+    if isinstance(coords[0], list) and coords[0] and isinstance(coords[0][0], list):
+        # Could be polygon or multipolygon
+        # Polygon: coords[0] is ring of points
+        if coords[0] and coords[0][0] and isinstance(coords[0][0][0], (int, float)):
+            for p in coords[0]:
+                if isinstance(p, list) and len(p) >= 2:
+                    points.append((float(p[0]), float(p[1])))
+            return points
+        # MultiPolygon: coords[0][0] is ring
+        if coords[0] and coords[0][0] and coords[0][0][0] and isinstance(coords[0][0][0][0], (int, float)):
+            for poly in coords:
+                if not poly or not poly[0]:
+                    continue
+                for p in poly[0]:
+                    if isinstance(p, list) and len(p) >= 2:
+                        points.append((float(p[0]), float(p[1])))
+            return points
+    return points
+
+
+def _build_sampling_points(points: List[Tuple[float, float]], max_points: int = 12) -> List[Dict]:
+    """Build representative sampling points from polygon vertices + centroid."""
+    if not points:
+        return []
+    # centroid (simple average; good enough as sampling point)
+    cx = sum(p[0] for p in points) / len(points)
+    cy = sum(p[1] for p in points) / len(points)
+    result = [{"x": cx, "y": cy}]
+
+    # add a spread of vertices around ring
+    step = max(1, math.ceil(len(points) / (max_points - 1)))
+    for i in range(0, len(points), step):
+        x, y = points[i]
+        result.append({"x": x, "y": y})
+        if len(result) >= max_points:
+            break
+    return result
+
+
+async def _fetch_pand_sampling_points(pand_ids: List[str], bag_api_key: str) -> List[Dict]:
+    """
+    Fetch first pand geometry and create representative RD points for bestemming sampling.
+    """
+    if not pand_ids:
+        return []
+
+    headers = {
+        "X-Api-Key": bag_api_key,
+        "Accept": "application/json",
+        "Accept-Crs": "epsg:28992",
+    }
+    pand_id = pand_ids[0]
+    url = f"{BAG_BASE}/panden/{pand_id}"
+
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.get(url, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as e:
+        logger.warning(f"BAG pand geometry query failed: {e}")
+        return []
+
+    coords = _find_coordinates_recursive(data)
+    if not coords:
+        return []
+    ring_points = _flatten_ring_points(coords)
+    return _build_sampling_points(ring_points)
 
 
 def format_bag_for_llm(bag_data: Dict) -> str:
@@ -110,4 +220,7 @@ def format_bag_for_llm(bag_data: Dict) -> str:
     pand_ids = bag_data.get("pand_ids", [])
     if pand_ids:
         lines.append(f"Pand ID(s): {', '.join(pand_ids)}")
+    rd_points = bag_data.get("rd_points", [])
+    if rd_points:
+        lines.append(f"Pand geometrie samplingpunten: {len(rd_points)}")
     return "\n".join(lines)

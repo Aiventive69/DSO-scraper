@@ -141,15 +141,27 @@ async def _fetch_enkelbestemming_at_point(x_rd: float, y_rd: float, delta: float
         return props
 
 
-async def _pick_bestemming_by_sampling(x_rd: float, y_rd: float) -> Optional[Dict]:
+async def _pick_bestemming_by_sampling(
+    x_rd: float,
+    y_rd: float,
+    preferred_points: Optional[List[Dict]] = None,
+) -> Optional[Dict]:
     """
     Query enkelbestemming on center + nearby offsets and choose the most frequent result.
     This reduces single-pixel misclassification on parcel boundaries/road edges.
     """
     import asyncio
-    # 5 sample points: center + four offsets (~6m)
+    points: List[tuple] = []
+    if preferred_points:
+        for p in preferred_points[:16]:
+            try:
+                points.append((float(p["x"]), float(p["y"])))
+            except Exception:
+                continue
+    # add local fallback points around center
     offsets = [(0.0, 0.0), (6.0, 0.0), (-6.0, 0.0), (0.0, 6.0), (0.0, -6.0)]
-    tasks = [_fetch_enkelbestemming_at_point(x_rd + dx, y_rd + dy) for dx, dy in offsets]
+    points.extend([(x_rd + dx, y_rd + dy) for dx, dy in offsets])
+    tasks = [_fetch_enkelbestemming_at_point(px, py) for px, py in points]
     samples = await asyncio.gather(*tasks)
     valid = [s for s in samples if s and s.get("naam")]
     if not valid:
@@ -384,7 +396,7 @@ def _pick_bijlagen_urls(links: List[str]) -> List[str]:
     return candidates[:2]
 
 
-async def get_bestemmingsplan_data(x_rd: float, y_rd: float) -> Dict:
+async def get_bestemmingsplan_data(x_rd: float, y_rd: float, bag_sampling_points: Optional[List[Dict]] = None) -> Dict:
     """
     Full pipeline: WMS feature info + plan text fetching (all in parallel).
 
@@ -409,6 +421,7 @@ async def get_bestemmingsplan_data(x_rd: float, y_rd: float) -> Dict:
         "algemene_regels_tekst": "",       # Full document text for general provisions
         "bijlagen_tekst": "",              # Annex text (e.g. lijst bedrijfsactiviteiten)
         "bestemming_bron": "",             # direct | sampled | nearby | onbekend
+        "heeft_perceel_specifieke_regels": False,
         "dubbelbestemmingen": [],
         "gebiedsaanduidingen": [],
         "functieaanduidingen": [],
@@ -461,6 +474,7 @@ async def get_bestemmingsplan_data(x_rd: float, y_rd: float) -> Dict:
     if eb:
         result["bestemming"] = eb.get("naam")
         result["bestemming_bron"] = "direct"
+        result["heeft_perceel_specifieke_regels"] = True
         url_raw = eb.get("verwijzingnaartekst", "")
         if url_raw:
             full_url = url_raw.strip()
@@ -470,7 +484,11 @@ async def get_bestemmingsplan_data(x_rd: float, y_rd: float) -> Dict:
             bestemming_anchor_url = full_url if "#" in full_url else None
 
     # Robust bestemming correction via multi-point sampling
-    sampled_eb = await _pick_bestemming_by_sampling(x_rd, y_rd)
+    sampled_eb = await _pick_bestemming_by_sampling(
+        x_rd=x_rd,
+        y_rd=y_rd,
+        preferred_points=bag_sampling_points,
+    )
     if sampled_eb and sampled_eb.get("naam"):
         sampled_name = sampled_eb.get("naam")
         if sampled_name != result.get("bestemming"):
@@ -479,7 +497,8 @@ async def get_bestemmingsplan_data(x_rd: float, y_rd: float) -> Dict:
                 f"'{result.get('bestemming')}' -> '{sampled_name}'"
             )
         result["bestemming"] = sampled_name
-        result["bestemming_bron"] = "sampled"
+        result["bestemming_bron"] = "sampled_bag" if bag_sampling_points else "sampled"
+        result["heeft_perceel_specifieke_regels"] = True
         sampled_url_raw = sampled_eb.get("verwijzingnaartekst", "")
         if sampled_url_raw:
             sampled_full = sampled_url_raw.strip()
@@ -492,6 +511,7 @@ async def get_bestemmingsplan_data(x_rd: float, y_rd: float) -> Dict:
         if nearby_eb and nearby_eb.get("naam"):
             result["bestemming"] = nearby_eb.get("naam")
             result["bestemming_bron"] = "nearby"
+            result["heeft_perceel_specifieke_regels"] = False
             nearby_url_raw = nearby_eb.get("verwijzingnaartekst", "")
             if nearby_url_raw:
                 nearby_full = nearby_url_raw.strip()
@@ -587,6 +607,9 @@ def format_bestemmingsplan_for_llm(data: Dict) -> str:
         if bron == "nearby":
             lines.append(f"**Waarschijnlijke bestemming nabij dit perceel: {data['bestemming']}**")
             lines.append("_(Afgeleid uit nabijgelegen kaartobjecten; verifieer in 'Regels op de kaart')_")
+        elif bron == "sampled_bag":
+            lines.append(f"**Bestemming op dit perceel: {data['bestemming']}**")
+            lines.append("_(Afgeleid uit sampling op BAG pandgeometrie)_")
         else:
             lines.append(f"**Bestemming op dit perceel: {data['bestemming']}**")
     else:
@@ -607,6 +630,16 @@ def format_bestemmingsplan_for_llm(data: Dict) -> str:
 
     # Specific bestemming article (via anchor URL — contains all rules for this bestemming)
     artikel_tekst = data.get("bestemming_artikel_tekst", "").strip()
+    if data.get("heeft_perceel_specifieke_regels"):
+        lines.append("**Status perceelregels: PERCEEL-SPECIFIEK GEVONDEN**")
+    else:
+        lines.append("**Status perceelregels: GEEN ZEKERE PERCEEL-SPECIFIEKE ENKELBESTEMMING GEVONDEN**")
+        lines.append(
+            "Gebruik onderstaande planregels als algemene context voor de locatie. "
+            "Bevestig perceelgerichte uitkomsten in 'Regels op de kaart'."
+        )
+    lines.append("")
+
     if artikel_tekst:
         lines.append(f"## Bestemmingsartikel: {data.get('bestemming', 'bestemming')}")
         lines.append(artikel_tekst)

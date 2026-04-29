@@ -32,6 +32,10 @@ Instructies:
 - Geef voldoende context en detail, niet alleen een ultrakorte conclusie
 - Gebruik bullet points als er meerdere relevante punten zijn
 - Geen inleiding, geen herhaling van de vraag — ga direct naar het antwoord
+- Beslisvolgorde:
+  1) Als "Status perceelregels: PERCEEL-SPECIFIEK GEVONDEN" aanwezig is, gebruik die regels als hoofdbron.
+  2) Als "GEEN ZEKERE PERCEEL-SPECIFIEKE ENKELBESTEMMING GEVONDEN" aanwezig is, zeg dat expliciet en geef alleen algemene omgevingsregels.
+  3) Gebruik secundaire contextbronnen alleen aanvullend, niet als primaire grondslag voor bestemming op perceel.
 
 Als de vraag gaat over de bestemming van een perceel, geef dan ALTIJD:
 1. De naam van de bestemming en het artikelnummer
@@ -68,6 +72,7 @@ Combineer deze tot één volledig, samenhangend antwoord op de vraag.
 - Gebruik bullet points voor meerdere punten
 - Geen inleiding, geen herhaling van de vraag — ga direct naar het antwoord
 - Benoem expliciet als gemeentelijke bronnen nodig zijn voor definitieve zekerheid
+- Als perceel-specifieke regels ontbreken, zeg dat expliciet en label je antwoord als algemene context voor de locatie
 Sluit af met één zin disclaimer over juridische zekerheid."""
 
 

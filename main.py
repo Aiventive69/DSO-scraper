@@ -161,6 +161,7 @@ async def query_omgevingsplan(req: QueryRequest):
         logger.warning(f"Straat-niveau geocoding: {coords['adres_display']}")
 
     all_plan_texts = []
+    secondary_context_texts = []
     if geocode_waarschuwing:
         all_plan_texts.append(geocode_waarschuwing)
     if _vraag_heeft_gemeentelijke_broncheck_nodig(req.vraag):
@@ -178,6 +179,7 @@ async def query_omgevingsplan(req: QueryRequest):
     heeft_omgevingsplan = False
     heeft_bestemmingsplan = False
     dso_heeft_inhoud = False
+    bag_data = {}
 
     # Step 1b: Aanvullende landelijke contextbronnen (RCE / BRK / Waterschappen)
     if coords.get("lon") is not None and coords.get("lat") is not None:
@@ -202,13 +204,13 @@ async def query_omgevingsplan(req: QueryRequest):
                 natura2000_gebieden=natura2000_gebieden,
             )
             if extra_context:
-                all_plan_texts.append(extra_context)
+                secondary_context_texts.append(extra_context)
             bag_text = format_bag_for_llm(bag_data)
             if bag_text:
-                all_plan_texts.append(bag_text)
+                secondary_context_texts.append(bag_text)
             vergunningcheck_text = format_vergunningcheck_for_llm(vergunningcheck_items)
             if vergunningcheck_text:
-                all_plan_texts.append(vergunningcheck_text)
+                secondary_context_texts.append(vergunningcheck_text)
 
             if rijksmonumenten:
                 bronnen.append(
@@ -350,6 +352,7 @@ async def query_omgevingsplan(req: QueryRequest):
             bp_data = await get_bestemmingsplan_data(
                 x_rd=coords["x_rd"],
                 y_rd=coords["y_rd"],
+                bag_sampling_points=bag_data.get("rd_points", []),
             )
 
             if bp_data.get("plan_naam"):
@@ -402,7 +405,16 @@ async def query_omgevingsplan(req: QueryRequest):
         samenvatting = combined_text
         ai_gebruikt = False
     else:
-        combined_text = "\n\n".join(all_plan_texts)
+        # Keep planregel-bronnen as primary context, and append other sources after.
+        combined_blocks = list(all_plan_texts)
+        if secondary_context_texts:
+            combined_blocks.append(
+                "## Secundaire contextbronnen\n"
+                "Gebruik onderstaande bronnen alleen aanvullend. "
+                "Perceel-specifieke planregels (indien aanwezig) blijven leidend."
+            )
+            combined_blocks.extend(secondary_context_texts)
+        combined_text = "\n\n".join(combined_blocks)
 
         if OPENAI_API_KEY:
             try:
