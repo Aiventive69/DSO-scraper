@@ -7,6 +7,7 @@ then summarizes it using OpenAI based on the user's question.
 import os
 import asyncio
 import logging
+import re
 from contextlib import asynccontextmanager
 from typing import Optional
 from fastapi import FastAPI, HTTPException, Query
@@ -74,6 +75,44 @@ def _vraag_heeft_gemeentelijke_broncheck_nodig(vraag: str) -> bool:
         "inrit",
     ]
     return any(k in q for k in keywords)
+
+
+def _enforce_answer_contract(answer: str, perceel_specifiek: bool) -> str:
+    """
+    Enforce stable output contract for UI consistency.
+    - Force status label based on backend certainty
+    - Remove generic municipal warning when perceel-specifiek confirmed
+    """
+    if not answer:
+        return answer
+
+    status_line = (
+        "Perceel-specifiek bevestigd"
+        if perceel_specifiek
+        else "Alleen algemene locatiecontext"
+    )
+
+    # Normalize first "Status" block if present
+    if re.search(r"(?im)^status\s*$", answer):
+        answer = re.sub(
+            r"(?ims)(^status\s*\n+)(.*?)(\n{2,}|$)",
+            r"\1" + status_line + r"\3",
+            answer,
+            count=1,
+        )
+    else:
+        # Prepend explicit status block if missing
+        answer = f"Status\n{status_line}\n\n" + answer
+
+    # If perceel is confirmed, avoid generic municipal fallback warning
+    if perceel_specifiek:
+        answer = re.sub(
+            r"(?im)^.*gemeentelijke bronnen.*\n?",
+            "",
+            answer,
+        ).strip()
+
+    return answer
 
 
 @asynccontextmanager
@@ -180,6 +219,7 @@ async def query_omgevingsplan(req: QueryRequest):
     heeft_bestemmingsplan = False
     dso_heeft_inhoud = False
     bag_data = {}
+    perceel_specifiek_bevestigd = False
 
     # Step 1b: Aanvullende landelijke contextbronnen (RCE / BRK / Waterschappen)
     if coords.get("lon") is not None and coords.get("lat") is not None:
@@ -359,6 +399,10 @@ async def query_omgevingsplan(req: QueryRequest):
                 heeft_bestemmingsplan = True
                 bestemmingsplan_naam = bp_data["plan_naam"]
                 bestemming_naam = bp_data.get("bestemming")
+                perceel_specifiek_bevestigd = bool(
+                    bp_data.get("heeft_perceel_specifieke_regels")
+                    and bp_data.get("bestemming_bron") != "nearby"
+                )
 
                 logger.info(
                     f"Bestemmingsplan: {bestemmingsplan_naam} | "
@@ -424,6 +468,10 @@ async def query_omgevingsplan(req: QueryRequest):
                     adres=coords["adres_display"],
                     model=OPENAI_MODEL,
                     api_key=OPENAI_API_KEY,
+                )
+                samenvatting = _enforce_answer_contract(
+                    samenvatting,
+                    perceel_specifiek=perceel_specifiek_bevestigd,
                 )
                 ai_gebruikt = True
             except Exception as e:
