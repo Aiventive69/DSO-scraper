@@ -10,6 +10,10 @@ services:
         sync: false
       - key: OPENAI_API_KEY
         sync: false
+      - key: BAG_API_KEY
+        sync: false
+      - key: DSO_TR_ZOEK_ENDPOINT
+        sync: false
       - key: OPENAI_MODEL
         value: gpt-4o-mini
       - key: DSO_PRODUCTION

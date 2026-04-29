@@ -5,6 +5,7 @@ then summarizes it using OpenAI based on the user's question.
 """
 
 import os
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -23,6 +24,18 @@ from services.dso_client import (
 )
 from services.wms_client import get_bestemmingsplan_data, format_bestemmingsplan_for_llm
 from services.summarizer import summarize_with_openai, format_without_ai
+from services.context_clients import (
+    fetch_rijksmonumenten_nearby,
+    fetch_brk_perceel_context,
+    fetch_waterschapszoneringen,
+    fetch_natura2000_context,
+    format_extra_context_for_llm,
+)
+from services.bag_client import fetch_bag_context, format_bag_for_llm
+from services.vergunningcheck_client import (
+    fetch_vergunningcheck_context,
+    format_vergunningcheck_for_llm,
+)
 
 load_dotenv()  # Laad .env lokaal; Render-env vars worden nooit overschreven
 logging.basicConfig(level=logging.INFO)
@@ -32,12 +45,35 @@ DSO_API_KEY = os.getenv("DSO_API_KEY", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 DSO_PRODUCTION = os.getenv("DSO_PRODUCTION", "").lower() in ("true", "1", "yes")
+BAG_API_KEY = os.getenv("BAG_API_KEY", "")
+DSO_TR_ZOEK_ENDPOINT = os.getenv("DSO_TR_ZOEK_ENDPOINT", "")
 
 # Log key presence (never log the actual value)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 logger.info(f"OPENAI_API_KEY aanwezig: {bool(OPENAI_API_KEY)}")
 logger.info(f"DSO_API_KEY aanwezig: {bool(DSO_API_KEY)}")
+logger.info(f"BAG_API_KEY aanwezig: {bool(BAG_API_KEY)}")
+
+
+def _vraag_heeft_gemeentelijke_broncheck_nodig(vraag: str) -> bool:
+    q = (vraag or "").lower()
+    keywords = [
+        "gemeentelijk monument",
+        "monument",
+        "welstand",
+        "beeldkwaliteit",
+        "bouwhistorie",
+        "architectuurhistorie",
+        "parkeren",
+        "parkeernorm",
+        "parkeerplaats",
+        "kapvergunning",
+        "boom kappen",
+        "uitrit",
+        "inrit",
+    ]
+    return any(k in q for k in keywords)
 
 
 @asynccontextmanager
@@ -127,6 +163,14 @@ async def query_omgevingsplan(req: QueryRequest):
     all_plan_texts = []
     if geocode_waarschuwing:
         all_plan_texts.append(geocode_waarschuwing)
+    if _vraag_heeft_gemeentelijke_broncheck_nodig(req.vraag):
+        all_plan_texts.append(
+            "## Dekking-notitie\n"
+            "Voor deze vraag kunnen gemeentelijke detailbronnen aanvullend nodig zijn "
+            "(bijv. gemeentelijke monumentenlijst, lokale parkeernormen, welstands-/beeldkwaliteitsregels, "
+            "bouwhistorische waarderingskaarten). "
+            "Deze bronnen zijn niet voor elke gemeente landelijk uniform gekoppeld."
+        )
     bronnen = []
     omgevingsplan_naam = None
     bestemmingsplan_naam = None
@@ -134,6 +178,97 @@ async def query_omgevingsplan(req: QueryRequest):
     heeft_omgevingsplan = False
     heeft_bestemmingsplan = False
     dso_heeft_inhoud = False
+
+    # Step 1b: Aanvullende landelijke contextbronnen (RCE / BRK / Waterschappen)
+    if coords.get("lon") is not None and coords.get("lat") is not None:
+        try:
+            rijksmonumenten, brk_percelen, waterschapszones, natura2000_gebieden, bag_data, vergunningcheck_items = await asyncio.gather(
+                fetch_rijksmonumenten_nearby(coords["lon"], coords["lat"]),
+                fetch_brk_perceel_context(coords["lon"], coords["lat"]),
+                fetch_waterschapszoneringen(coords["lon"], coords["lat"]),
+                fetch_natura2000_context(coords["lon"], coords["lat"]),
+                fetch_bag_context(coords["adres_display"], BAG_API_KEY),
+                fetch_vergunningcheck_context(
+                    vraag=req.vraag,
+                    dso_api_key=DSO_API_KEY,
+                    endpoint_override=DSO_TR_ZOEK_ENDPOINT or None,
+                ),
+            )
+
+            extra_context = format_extra_context_for_llm(
+                rijksmonumenten=rijksmonumenten,
+                brk_percelen=brk_percelen,
+                waterschapszones=waterschapszones,
+                natura2000_gebieden=natura2000_gebieden,
+            )
+            if extra_context:
+                all_plan_texts.append(extra_context)
+            bag_text = format_bag_for_llm(bag_data)
+            if bag_text:
+                all_plan_texts.append(bag_text)
+            vergunningcheck_text = format_vergunningcheck_for_llm(vergunningcheck_items)
+            if vergunningcheck_text:
+                all_plan_texts.append(vergunningcheck_text)
+
+            if rijksmonumenten:
+                bronnen.append(
+                    {
+                        "type": "rijksmonumenten",
+                        "naam": f"{len(rijksmonumenten)} monument(en) in de buurt",
+                        "bron": "RCE Rijksmonumenten API",
+                    }
+                )
+            if brk_percelen:
+                bronnen.append(
+                    {
+                        "type": "kadastraal",
+                        "naam": f"{len(brk_percelen)} perceelobject(en)",
+                        "bron": "PDOK BRK Kadastrale Kaart OGC API",
+                    }
+                )
+            if waterschapszones:
+                bronnen.append(
+                    {
+                        "type": "waterschap",
+                        "naam": f"{len(waterschapszones)} zonering(en)",
+                        "bron": "PDOK Waterschappen Zoneringen IMWA OGC API",
+                    }
+                )
+            if natura2000_gebieden:
+                bronnen.append(
+                    {
+                        "type": "natura2000",
+                        "naam": f"{len(natura2000_gebieden)} Natura2000 object(en)",
+                        "bron": "PDOK RVO Natura2000 OGC API",
+                    }
+                )
+            if bag_data:
+                bronnen.append(
+                    {
+                        "type": "bag",
+                        "naam": "BAG objectcontext",
+                        "bron": "Kadaster BAG API v2",
+                    }
+                )
+            if vergunningcheck_items:
+                bronnen.append(
+                    {
+                        "type": "vergunningcheck",
+                        "naam": f"{len(vergunningcheck_items)} toepasbare-regels hit(s)",
+                        "bron": "DSO Toepasbare Regels Zoeken API",
+                    }
+                )
+            if _vraag_heeft_gemeentelijke_broncheck_nodig(req.vraag):
+                bronnen.append(
+                    {
+                        "type": "dekking",
+                        "naam": "Gemeentelijke detailbroncheck aanbevolen",
+                        "bron": "Niet-landelijk-uniforme gemeentelijke bronnen",
+                    }
+                )
+
+        except Exception as e:
+            logger.warning(f"Extra context bronnen fout: {e}")
 
     # Step 2: Query DSO omgevingsplan (primaire bron — wordt rijker naarmate gemeenten migreren)
     if DSO_API_KEY:

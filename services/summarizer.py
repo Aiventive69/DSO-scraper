@@ -28,7 +28,8 @@ Instructies:
 - Beantwoord de gestelde vraag op basis van de plantekst
 - Haal uitsluitend informatie uit de aangeleverde tekst; verzin niets
 - Citeer het relevante artikelnummer of de sectie (bijv. "Artikel 4.1" of "lid 4.2.1")
-- Schrijf beknopt en praktisch: de lezer is een makelaar, geen jurist
+- Schrijf praktisch en duidelijk: de lezer is een makelaar, geen jurist
+- Geef voldoende context en detail, niet alleen een ultrakorte conclusie
 - Gebruik bullet points als er meerdere relevante punten zijn
 - Geen inleiding, geen herhaling van de vraag — ga direct naar het antwoord
 
@@ -40,6 +41,16 @@ Als de vraag gaat over de bestemming van een perceel, geef dan ALTIJD:
 
 Als er werkelijk geen informatie over het gevraagde onderwerp in de tekst staat,
 zeg dan duidelijk: "De aangeleverde plantekst bevat geen regels over [onderwerp]."
+
+Als de vraag gaat over bedrijvigheid in categorie 1/2 of verwijst naar
+"Lijst van bedrijfsactiviteiten", geef dan:
+- welke activiteiten expliciet zijn toegestaan of uitgesloten volgens de lijst,
+- eventuele voorwaarden/beperkingen,
+- en als de lijsttekst niet in de aangeleverde context staat: meld dat expliciet.
+
+Als de aangeleverde context aangeeft dat gemeentelijke detailbronnen mogelijk ontbreken
+(bijv. gemeentelijke monumenten, parkeernormen, welstand of bouwhistorie),
+geef dat dan expliciet aan onder het kopje "Aanvullende broncheck nodig".
 
 Sluit altijd af met één zin disclaimer over juridische zekerheid."""
 
@@ -53,9 +64,10 @@ SYNTHESIZE_PROMPT = """Je hebt meerdere extracten ontvangen uit verschillende de
 Combineer deze tot één volledig, samenhangend antwoord op de vraag.
 - Verwijder dubbele informatie
 - Citeer artikelnummers
-- Schrijf beknopt en praktisch voor een makelaar
+- Schrijf praktisch en voldoende uitgebreid voor een makelaar
 - Gebruik bullet points voor meerdere punten
 - Geen inleiding, geen herhaling van de vraag — ga direct naar het antwoord
+- Benoem expliciet als gemeentelijke bronnen nodig zijn voor definitieve zekerheid
 Sluit af met één zin disclaimer over juridische zekerheid."""
 
 
@@ -161,7 +173,7 @@ async def _synthesize(
                 {"role": "user", "content": user_message},
             ],
             temperature=0.1,
-            max_tokens=2500,
+            max_tokens=3200,
         )
     return result or "Geen antwoord ontvangen."
 
@@ -207,7 +219,7 @@ async def summarize_with_openai(
                     {"role": "user", "content": user_message},
                 ],
                 temperature=0.1,
-                max_tokens=2500,
+                max_tokens=3200,
             ) or "Geen antwoord ontvangen."
 
     # Multi-chunk path: max MAX_CONCURRENT parallel extractions + synthesis

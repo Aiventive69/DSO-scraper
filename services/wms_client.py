@@ -130,6 +130,77 @@ async def _fetch_layer_multi(client: httpx.AsyncClient, layer: str, bbox: str, f
         return layer, []
 
 
+async def _fetch_enkelbestemming_at_point(x_rd: float, y_rd: float, delta: float = 120.0) -> Optional[Dict]:
+    """
+    Fetch enkelbestemming at a specific point.
+    Used for robust bestemming selection via multi-point sampling.
+    """
+    bbox = f"{x_rd - delta},{y_rd - delta},{x_rd + delta},{y_rd + delta}"
+    async with httpx.AsyncClient(timeout=20) as client:
+        _, props = await _fetch_layer(client, "enkelbestemming", bbox, feature_count=1)
+        return props
+
+
+async def _pick_bestemming_by_sampling(x_rd: float, y_rd: float) -> Optional[Dict]:
+    """
+    Query enkelbestemming on center + nearby offsets and choose the most frequent result.
+    This reduces single-pixel misclassification on parcel boundaries/road edges.
+    """
+    import asyncio
+    # 5 sample points: center + four offsets (~6m)
+    offsets = [(0.0, 0.0), (6.0, 0.0), (-6.0, 0.0), (0.0, 6.0), (0.0, -6.0)]
+    tasks = [_fetch_enkelbestemming_at_point(x_rd + dx, y_rd + dy) for dx, dy in offsets]
+    samples = await asyncio.gather(*tasks)
+    valid = [s for s in samples if s and s.get("naam")]
+    if not valid:
+        return None
+
+    # Majority vote on 'naam'
+    counts: Dict[str, int] = {}
+    for v in valid:
+        nm = v.get("naam", "")
+        counts[nm] = counts.get(nm, 0) + 1
+    best_name = max(counts.items(), key=lambda kv: kv[1])[0]
+    # Return first matching sample as representative
+    for v in valid:
+        if v.get("naam") == best_name:
+            return v
+    return valid[0]
+
+
+async def _find_nearest_enkelbestemming(x_rd: float, y_rd: float) -> Optional[Dict]:
+    """
+    Fallback search for enkelbestemming around the address point.
+    Useful when the exact geocode point falls on road/overlay layers.
+    """
+    import asyncio
+    radii = [0.0, 8.0, 15.0, 25.0, 40.0, 60.0, 90.0, 130.0, 180.0]
+    for r in radii:
+        if r == 0:
+            points = [(x_rd, y_rd)]
+        else:
+            points = [
+                (x_rd + r, y_rd), (x_rd - r, y_rd), (x_rd, y_rd + r), (x_rd, y_rd - r),
+                (x_rd + r, y_rd + r), (x_rd - r, y_rd - r), (x_rd + r, y_rd - r), (x_rd - r, y_rd + r),
+            ]
+        tasks = [_fetch_enkelbestemming_at_point(px, py) for px, py in points]
+        samples = await asyncio.gather(*tasks)
+        valid = [s for s in samples if s and s.get("naam")]
+        if valid:
+            # Use majority vote within this radius ring
+            counts: Dict[str, int] = {}
+            for v in valid:
+                nm = v.get("naam", "")
+                counts[nm] = counts.get(nm, 0) + 1
+            best_name = max(counts.items(), key=lambda kv: kv[1])[0]
+            for v in valid:
+                if v.get("naam") == best_name:
+                    logger.info(f"Bestemming gevonden op radius {r}m: {best_name}")
+                    return v
+            return valid[0]
+    return None
+
+
 async def get_bestemmingsplan_features(x_rd: float, y_rd: float) -> Dict:
     """
     Query all relevant WMS layers for the given RD coordinate (in parallel).
@@ -303,6 +374,16 @@ def _pick_regels_url(links: List[str]) -> Optional[str]:
     return r_pdf
 
 
+def _pick_bijlagen_urls(links: List[str]) -> List[str]:
+    """
+    Pick likely annex/list documents (bijlagen), e.g. b_*.html/pdf.
+    These often contain 'Lijst van bedrijfsactiviteiten'.
+    """
+    candidates = [l for l in links if re.search(r'/b_[^/]+\.(html|pdf)$', l, re.IGNORECASE)]
+    # Keep deterministic order and avoid huge fan-out
+    return candidates[:2]
+
+
 async def get_bestemmingsplan_data(x_rd: float, y_rd: float) -> Dict:
     """
     Full pipeline: WMS feature info + plan text fetching (all in parallel).
@@ -326,6 +407,8 @@ async def get_bestemmingsplan_data(x_rd: float, y_rd: float) -> Dict:
         "bestemming_url": None,
         "bestemming_artikel_tekst": "",   # Specific bestemming article (via anchor)
         "algemene_regels_tekst": "",       # Full document text for general provisions
+        "bijlagen_tekst": "",              # Annex text (e.g. lijst bedrijfsactiviteiten)
+        "bestemming_bron": "",             # direct | sampled | nearby | onbekend
         "dubbelbestemmingen": [],
         "gebiedsaanduidingen": [],
         "functieaanduidingen": [],
@@ -377,6 +460,7 @@ async def get_bestemmingsplan_data(x_rd: float, y_rd: float) -> Dict:
     bestemming_anchor_url = None
     if eb:
         result["bestemming"] = eb.get("naam")
+        result["bestemming_bron"] = "direct"
         url_raw = eb.get("verwijzingnaartekst", "")
         if url_raw:
             full_url = url_raw.strip()
@@ -384,6 +468,35 @@ async def get_bestemmingsplan_data(x_rd: float, y_rd: float) -> Dict:
             result["bestemming_url"] = base_url
             # Keep the full anchor URL for precise article fetching
             bestemming_anchor_url = full_url if "#" in full_url else None
+
+    # Robust bestemming correction via multi-point sampling
+    sampled_eb = await _pick_bestemming_by_sampling(x_rd, y_rd)
+    if sampled_eb and sampled_eb.get("naam"):
+        sampled_name = sampled_eb.get("naam")
+        if sampled_name != result.get("bestemming"):
+            logger.info(
+                f"Bestemming gecorrigeerd via sampling: "
+                f"'{result.get('bestemming')}' -> '{sampled_name}'"
+            )
+        result["bestemming"] = sampled_name
+        result["bestemming_bron"] = "sampled"
+        sampled_url_raw = sampled_eb.get("verwijzingnaartekst", "")
+        if sampled_url_raw:
+            sampled_full = sampled_url_raw.strip()
+            result["bestemming_url"] = sampled_full.split("#")[0]
+            bestemming_anchor_url = sampled_full if "#" in sampled_full else bestemming_anchor_url
+
+    # Final fallback: search nearby rings if still no bestemming
+    if not result.get("bestemming"):
+        nearby_eb = await _find_nearest_enkelbestemming(x_rd, y_rd)
+        if nearby_eb and nearby_eb.get("naam"):
+            result["bestemming"] = nearby_eb.get("naam")
+            result["bestemming_bron"] = "nearby"
+            nearby_url_raw = nearby_eb.get("verwijzingnaartekst", "")
+            if nearby_url_raw:
+                nearby_full = nearby_url_raw.strip()
+                result["bestemming_url"] = nearby_full.split("#")[0]
+                bestemming_anchor_url = nearby_full if "#" in nearby_full else bestemming_anchor_url
 
     db = features.get("dubbelbestemming")
     if isinstance(db, list):
@@ -419,6 +532,11 @@ async def get_bestemmingsplan_data(x_rd: float, y_rd: float) -> Dict:
         fetch_tasks.append(fetch_full_plan_text(result["bestemming_url"]))
         task_keys.append("volledig")
 
+    # Fetch annex documents (bijlagen), often containing business category lists
+    for b_url in _pick_bijlagen_urls(result.get("plan_links", [])):
+        fetch_tasks.append(fetch_full_plan_text(b_url))
+        task_keys.append("bijlage")
+
     if fetch_tasks:
         texts = await asyncio.gather(*fetch_tasks)
         for key, tekst in zip(task_keys, texts):
@@ -428,6 +546,12 @@ async def get_bestemmingsplan_data(x_rd: float, y_rd: float) -> Dict:
             elif key == "volledig":
                 result["algemene_regels_tekst"] = tekst
                 logger.info(f"Volledig document: {len(tekst)} tekens")
+            elif key == "bijlage" and tekst:
+                if result["bijlagen_tekst"]:
+                    result["bijlagen_tekst"] += "\n\n--- BIJLAGE ---\n\n" + tekst
+                else:
+                    result["bijlagen_tekst"] = tekst
+                logger.info(f"Bijlage toegevoegd: {len(tekst)} tekens")
 
     return result
 
@@ -459,7 +583,14 @@ def format_bestemmingsplan_for_llm(data: Dict) -> str:
 
     # Perceel-specifieke kenmerken (from WMS map attributes)
     if data.get("bestemming"):
-        lines.append(f"**Bestemming op dit perceel: {data['bestemming']}**")
+        bron = data.get("bestemming_bron", "onbekend")
+        if bron == "nearby":
+            lines.append(f"**Waarschijnlijke bestemming nabij dit perceel: {data['bestemming']}**")
+            lines.append("_(Afgeleid uit nabijgelegen kaartobjecten; verifieer in 'Regels op de kaart')_")
+        else:
+            lines.append(f"**Bestemming op dit perceel: {data['bestemming']}**")
+    else:
+        lines.append("**Bestemming op dit perceel: ONBEKEND (kaartlaag gaf geen direct resultaat)**")
     if data.get("bouwvlak"):
         lines.append("Bouwvlak aanwezig: ja")
     if data.get("maatvoering"):
@@ -491,5 +622,11 @@ def format_bestemmingsplan_for_llm(data: Dict) -> str:
         if legacy:
             lines.append("## Planregels")
             lines.append(legacy)
+
+    # Annexes often include concrete lists like 'Lijst van bedrijfsactiviteiten'
+    if data.get("bijlagen_tekst"):
+        lines.append("")
+        lines.append("## Bijlagen / Lijsten")
+        lines.append(data["bijlagen_tekst"])
 
     return "\n".join(lines)
