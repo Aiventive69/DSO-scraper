@@ -77,11 +77,41 @@ def _vraag_heeft_gemeentelijke_broncheck_nodig(vraag: str) -> bool:
     return any(k in q for k in keywords)
 
 
+_STANDARD_DISCLAIMER = (
+    "Disclaimer: Dit antwoord is geen juridisch advies; controleer conclusies altijd aan de "
+    "officiële plantekst (ruimtelijkeplannen.nl / omgevingsloket)."
+)
+
+
+def _append_gebruikte_documenten(samenvatting: str, bronnen: list) -> str:
+    """Voeg vaste links toe naar planteksten zodat gebruikers 'waar het staat' kunnen nalopen."""
+    if not samenvatting or not bronnen:
+        return samenvatting
+    lines: list = []
+    for b in bronnen:
+        url = b.get("url")
+        if not url:
+            continue
+        naam = b.get("naam") or b.get("bron") or "Document"
+        tid = b.get("identificatie")
+        extra = f" (id: {tid})" if tid else ""
+        lines.append(f"- **{naam}**{extra} — {url}")
+    if not lines:
+        return samenvatting
+    block = (
+        "\n\n## Geraadpleegde documenten (automatisch)\n\n"
+        + "\n".join(lines)
+        + "\n\n_Op de gekoppelde pagina vind je het bestemmingsartikel en/of volledige regels; gebruik daar de zoekfunctie (artikel / trefwoord) voor exacte standplaats._\n"
+    )
+    return samenvatting.rstrip() + block
+
+
 def _enforce_answer_contract(answer: str, perceel_specifiek: bool) -> str:
     """
     Enforce stable output contract for UI consistency.
     - Force status label based on backend certainty
-    - Remove generic municipal warning when perceel-specifiek confirmed
+    - Remove generic municipal fallback lines when parcel-level map rules are confirmed
+    - Normalize closing disclaimer wording
     """
     if not answer:
         return answer
@@ -104,13 +134,29 @@ def _enforce_answer_contract(answer: str, perceel_specifiek: bool) -> str:
         # Prepend explicit status block if missing
         answer = f"Status\n{status_line}\n\n" + answer
 
-    # If perceel is confirmed, avoid generic municipal fallback warning
+    # If parcel map rules confirmed, strip generic contradiction lines only
+    # (avoid removing plan quotes that legitimately mention a gemeente)
     if perceel_specifiek:
-        answer = re.sub(
-            r"(?im)^.*gemeentelijke bronnen.*\n?",
-            "",
-            answer,
-        ).strip()
+        drop_patterns = [
+            r"(?im)^.*gemeentelijke bronnen.*$\n?",
+            r"(?im)^.*verificatie bij de gemeente.*$\n?",
+            r"(?im)^juridische zekerheid kan niet worden gegarandeerd.*$\n?",
+            r"(?im)^.*geen juridische zekerheid zonder verdere verificatie.*$\n?",
+        ]
+        for pat in drop_patterns:
+            answer = re.sub(pat, "", answer)
+        answer = answer.strip()
+
+    # Replace any Disclaimer line variants with standard closing (once)
+    answer = re.sub(
+        r"(?im)^\*?\*?[Dd]isclaimer:?.*$",
+        "",
+        answer,
+        flags=re.MULTILINE,
+    ).strip()
+    answer = re.sub(r"\n{3,}", "\n\n", answer).strip()
+    answer = answer.rstrip()
+    answer = answer + ("\n\n" if answer else "") + _STANDARD_DISCLAIMER
 
     return answer
 
@@ -469,6 +515,7 @@ async def query_omgevingsplan(req: QueryRequest):
                     model=OPENAI_MODEL,
                     api_key=OPENAI_API_KEY,
                 )
+                samenvatting = _append_gebruikte_documenten(samenvatting, bronnen)
                 samenvatting = _enforce_answer_contract(
                     samenvatting,
                     perceel_specifiek=perceel_specifiek_bevestigd,

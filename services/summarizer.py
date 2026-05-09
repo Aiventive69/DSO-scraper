@@ -20,6 +20,27 @@ CHUNK_SIZE = 80_000    # chars per chunk sent to GPT
 CHUNK_OVERLAP = 1_000  # overlap between chunks to avoid cutting mid-sentence
 MAX_CONCURRENT = 3     # max parallel OpenAI calls (prevents TPM rate limit burst)
 
+KART_SNAPSHOT_MARK = "## Kaart-snapshot PDOK"
+
+
+def _extract_kaartsnapshot_block(plan_text: str) -> Optional[str]:
+    """
+    PDOK snapshot lives at the start of the WMS bundle; chunk-extracts may drop it.
+    Pull it from the full combined text for the synthesis step.
+    """
+    if KART_SNAPSHOT_MARK not in plan_text:
+        return None
+    i = plan_text.index(KART_SNAPSHOT_MARK)
+    tail = plan_text[i:]
+    for stop in ("\n**Status perceelregels", "\n## Bestemmingsartikel", "\n## Volledige planregels"):
+        j = tail.find(stop)
+        if j != -1:
+            tail = tail[:j]
+            break
+    block = tail.strip()
+    return block[:12_000] if block else None
+
+
 SYSTEM_PROMPT = """Je bent een expert assistent voor Nederlandse makelaars en vastgoedprofessionals.
 Je analyseert bestemmingsplan- en omgevingsplanteksten en beantwoordt daar gerichte vragen over.
 
@@ -39,15 +60,26 @@ Instructies:
 
 Outputformat (verplicht):
 1) Begin met: "Status: Perceel-specifiek bevestigd" OF "Status: Alleen algemene locatiecontext".
-2) Daarna: "Bestemming: <naam> (Artikel X[.Y])".
-3) Sectie "Toegestaan gebruik op dit perceel":
-   - alleen concrete toegestane doeleinden met artikel/lid bron
-4) Sectie "Beperkingen / aandachtspunten":
-   - beperkingen, voorwaarden, uitzonderingen met artikel/lid bron
-5) Sectie "Aanvullende regimes":
-   - dubbelbestemming/gebiedsaanduiding alleen als relevant
-6) Vermijd vage taal zoals "zijn mogelijk"; schrijf altijd "van toepassing" of "niet bevestigd voor dit perceel".
-7) Als een detail niet hard uit de tekst volgt, schrijf: "Niet bevestigd in aangeleverde perceelregels".
+2) **Sectie "Kaart-snapshot (PDOK WMS)"** direct na Status (vóór de rest):
+   - Samenvatting van het blok "## Kaart-snapshot PDOK" in max. 6 korte bullets.
+   - Per overlay: "Van toepassing volgens WMS-response: …" **of** "Niet gevonden in deze WMS-response voor dit punt (laag …)".
+3) **Sectie "Conclusie op de vraag"** (verplicht — direct na Kaart-snapshot):
+   - Beantwoord de vraag **in de eerste of tweede zin** concreet (bijv. ja/nee + korte voorwaarde uit de plantekst).
+   - Geen algemene prietpraat vóór de kern; geen lijst met toegestane functies hier — dat komt in de volgende secties.
+4) **Sectie "Bronverwijzing (waar dit op gebaseerd is)"** (verplicht):
+   - Bullet 1: welk plan (naam uit de context) en of je vooral **Bestemmingsartikel** of **Volledige planregels** hebt gebruikt.
+   - Per belangrijke stelling: **artikel + lid** (bijv. "art. 23.1a") uit de tekst, óf verwijs naar **PDOK Kaart-snapshot** voor overlays.
+   - Gebruik niet de formulering **"niet vermeld in de extracten"** als onderdeel tegenstrijdig is aan Status Perceel-specifiek gecombineerd met een ingevuld Kaart-snapshot — zeg dan wat het snapshot wél/geen naam geeft.
+5) **Bestemming:** korte kern + **(Artikel X.Y / lid …)** waar dat in het bestemmingsartikel staat; anders: "Exact artikel niet zichtbaar in uittreksel".
+6) Sectie "Toegestaan gebruik op dit perceel":
+   - Alleen zaken die **dit adres / deze bestemming** raken voor de onderwerp-vraag; met **(artikel/lid)** bij elke bullet die uit de tekst komt.
+7) Sectie "Beperkingen / aandachtspunten": idem met bronverwijzing.
+8) Sectie "Aanvullende regimes": alleen inhoudelijk met bron.
+9) Verboden: vage formulering als "ongeveer" daar waar de tekst een lijst geeft; geen tegenstrijdige zin tussen Perceel-specifiek en "onduidelijk door extracten".
+
+Let op:
+- Als de gebruiker bijvoorbeeld vraagt naar wonen **op/binnen de woning óf specifiek begane grond**: formuleer de conclusie daar expliciet op (niet alleen een algemeen lijstje bestemmingsactiviteiten).
+- Als een functielijst (detailhandel, horeca, enz.) bij **lage risico-classes** bij de tekst alleen geldt onder **bebording / aangeduid**, zeg dat letterlijk zoals in het artikel — niet alsof het standaard op elke begane grond geldt.
 
 Als de vraag gaat over de bestemming van een perceel, geef dan ALTIJD:
 1. De naam van de bestemming en het artikelnummer
@@ -68,30 +100,42 @@ Als de aangeleverde context aangeeft dat gemeentelijke detailbronnen mogelijk on
 (bijv. gemeentelijke monumenten, parkeernormen, welstand of bouwhistorie),
 geef dat dan expliciet aan onder het kopje "Aanvullende broncheck nodig".
 
-Sluit altijd af met één zin disclaimer over juridische zekerheid."""
+Sluit af met exact deze disclaimer (één zin, geen varianten):
+"Disclaimer: Dit antwoord is geen juridisch advies; controleer conclusies altijd aan de officiële plantekst (ruimtelijkeplannen.nl / omgevingsloket)."
+
+Gebruik geen aparte zin over "verificatie bij de gemeente" tenzij de aangeleverde context expliciet zegt dat gemeentelijke detailbronnen nodig zijn (Dekking-notitie)."""
 
 CHUNK_EXTRACT_PROMPT = """Je krijgt een DEEL van een bestemmingsplan of omgevingsplan.
 Extraheer ALLEEN de tekst die relevant is voor de onderstaande vraag.
 Kopieer de relevante artikelen, leden en zinnen letterlijk — voeg geen samenvatting toe.
 Als er niets relevant staat in dit deel, antwoord dan alleen: "GEEN RELEVANTE INFO IN DIT DEEL."
-Vermeld altijd het artikelnummer als dat aanwezig is."""
+vermeld altijd het artikelnummer als dat aanwezig is.
+
+Als dit deel het kopje "## Kaart-snapshot PDOK" bevat, laat dat volledig weg in je uittreksel
+(dit wordt apart meegegeven in de eindstap om doublures te voorkomen)."""
 
 SYNTHESIZE_PROMPT = """Je hebt meerdere extracten ontvangen uit verschillende delen van een bestemmingsplan.
 Combineer deze tot één volledig, samenhangend antwoord op de vraag.
 - Verwijder dubbele informatie
-- Citeer artikelnummers
-- Schrijf praktisch en voldoende uitgebreid voor een makelaar
+- Citeer artikelnummers / leden waar die in de extracten voorkomen
+- Als er een apart "## Kaart-snapshot PDOK" blok boven de uittreksels staat: gebruik dat feitelijk voor overlays (namen/leegtes)
+- Schrijf praktisch en voldoende uitgebreid voor een makelaar; geen wishy-washy schijn-voorwaarden
 - Gebruik bullet points voor meerdere punten
 - Geen inleiding, geen herhaling van de vraag — ga direct naar het antwoord
-- Benoem expliciet als gemeentelijke bronnen nodig zijn voor definitieve zekerheid
+- Benoem gemeentelijke bronnen alleen als de oorspronkelijke prompt een "Dekking-notitie" bevatte of de vraag daar echt om vraagt
 - Als perceel-specifieke regels ontbreken, zeg dat expliciet en label je antwoord als algemene context voor de locatie
 - Volg exact dit format:
   Status
+  Kaart-snapshot (PDOK WMS)
+  Conclusie op de vraag
+  Bronverwijzing (waar dit op gebaseerd is)
   Bestemming
   Toegestaan gebruik op dit perceel
   Beperkingen / aandachtspunten
   Aanvullende regimes
-Sluit af met één zin disclaimer over juridische zekerheid."""
+- Eerst conclusie en bronverwijzing, da pas de uitleg — geen "extracten" als zwakte als het snapshot wél gevuld is
+Sluit af met exact:
+Disclaimer: Dit antwoord is geen juridisch advies; controleer conclusies altijd aan de officiële plantekst (ruimtelijkeplannen.nl / omgevingsloket)."""
 
 
 def _split_into_chunks(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> List[str]:
@@ -165,6 +209,7 @@ async def _synthesize(
     vraag: str,
     adres: str,
     model: str,
+    full_plan_text: str,
 ) -> str:
     """Combine partial extracts into one final answer."""
     relevant = [e for e in extracts if "GEEN RELEVANTE INFO IN DIT DEEL" not in e]
@@ -179,9 +224,19 @@ async def _synthesize(
         f"[Uittreksel {i + 1}]\n{e}" for i, e in enumerate(relevant)
     )
 
+    snap = _extract_kaartsnapshot_block(full_plan_text)
+    snapshot_prefix = ""
+    if snap:
+        snapshot_prefix = (
+            "Het onderstaande **Kaart-snapshot PDOK** is leidend voor overlays (functie/gebied/dubbel/bouw) "
+            "en moet onder 'Kaart-snapshot (PDOK WMS)' worden samengevat (zie format-instructie).\n\n"
+            f"{snap}\n\n---\n\n"
+        )
+
     user_message = (
         f"Adres: {adres}\n"
         f"Vraag: {vraag}\n\n"
+        f"{snapshot_prefix}"
         f"Hieronder de relevante uittreksels uit het bestemmingsplan:\n\n"
         f"{combined}\n\n"
         f"Geef nu één volledig antwoord op de vraag."
@@ -253,7 +308,7 @@ async def summarize_with_openai(
         for i, chunk in enumerate(chunks)
     ]
     extracts = await asyncio.gather(*extract_tasks)
-    return await _synthesize(client, semaphore, list(extracts), vraag, adres, model)
+    return await _synthesize(client, semaphore, list(extracts), vraag, adres, model, plan_text)
 
 
 def format_without_ai(

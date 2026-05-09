@@ -213,6 +213,19 @@ async def _find_nearest_enkelbestemming(x_rd: float, y_rd: float) -> Optional[Di
     return None
 
 
+def _dedupe_str_list(items: List[str]) -> List[str]:
+    """Stable dedupe preserving first-seen order."""
+    seen = set()
+    out: List[str] = []
+    for x in items:
+        key = x.strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+    return out
+
+
 async def get_bestemmingsplan_features(x_rd: float, y_rd: float) -> Dict:
     """
     Query all relevant WMS layers for the given RD coordinate (in parallel).
@@ -224,10 +237,16 @@ async def get_bestemmingsplan_features(x_rd: float, y_rd: float) -> Dict:
     delta = 500  # 500m bounding box
     bbox = f"{x_rd - delta},{y_rd - delta},{x_rd + delta},{y_rd + delta}"
 
-    # Layers that return a single feature
-    single_layers = ["plangebied", "enkelbestemming", "dubbelbestemming", "bouwvlak", "functieaanduiding"]
-    # Layers where multiple overlapping features are common
-    multi_layers = ["maatvoering", "bouwaanduiding", "gebiedsaanduiding"]
+    # Layers where a single feature is sufficient / typical
+    single_layers = ["plangebied", "enkelbestemming", "bouwvlak"]
+    # Multiple overlapping polygons are common — use FEATURE_COUNT > 1
+    multi_layers = [
+        "maatvoering",
+        "bouwaanduiding",
+        "gebiedsaanduiding",
+        "dubbelbestemming",
+        "functieaanduiding",
+    ]
 
     async with httpx.AsyncClient(timeout=20) as client:
         single_tasks = [_fetch_layer(client, layer, bbox) for layer in single_layers]
@@ -453,12 +472,14 @@ async def get_bestemmingsplan_data(x_rd: float, y_rd: float, bag_sampling_points
         if mv_str:
             result["maatvoering"].append(mv_str)
 
-    # --- Functieaanduiding ---
-    fa = features.get("functieaanduiding")
-    if isinstance(fa, list):
-        fa = fa[0] if fa else None
-    if fa and fa.get("naam"):
-        result["functieaanduidingen"].append(fa["naam"])
+    # --- Functieaanduiding (possible multiple overlapping polygons) ---
+    fa_list = features.get("functieaanduiding") or []
+    if isinstance(fa_list, dict):
+        fa_list = [fa_list]
+    for fa in fa_list:
+        if fa.get("naam"):
+            result["functieaanduidingen"].append(fa["naam"])
+    result["functieaanduidingen"] = _dedupe_str_list(result["functieaanduidingen"])
 
     # --- Bouwaanduiding (multi-feature list) ---
     ba_list = features.get("bouwaanduiding") or []
@@ -518,11 +539,13 @@ async def get_bestemmingsplan_data(x_rd: float, y_rd: float, bag_sampling_points
                 result["bestemming_url"] = nearby_full.split("#")[0]
                 bestemming_anchor_url = nearby_full if "#" in nearby_full else bestemming_anchor_url
 
-    db = features.get("dubbelbestemming")
-    if isinstance(db, list):
-        db = db[0] if db else None
-    if db and db.get("naam"):
-        result["dubbelbestemmingen"].append(db["naam"])
+    db_list = features.get("dubbelbestemming") or []
+    if isinstance(db_list, dict):
+        db_list = [db_list]
+    for db in db_list:
+        if db.get("naam"):
+            result["dubbelbestemmingen"].append(db["naam"])
+    result["dubbelbestemmingen"] = _dedupe_str_list(result["dubbelbestemmingen"])
 
     # --- Gebiedsaanduiding (multi-feature list) ---
     ga_list = features.get("gebiedsaanduiding") or []
@@ -531,6 +554,9 @@ async def get_bestemmingsplan_data(x_rd: float, y_rd: float, bag_sampling_points
     for ga in ga_list:
         if ga.get("naam"):
             result["gebiedsaanduidingen"].append(ga["naam"])
+    result["gebiedsaanduidingen"] = _dedupe_str_list(result["gebiedsaanduidingen"])
+
+    result["bouwaanduidingen"] = _dedupe_str_list(result["bouwaanduidingen"])
 
     # --- Fetch plan texts in parallel ---
     # 1. Article-specific text (via anchor) → always contains kap/bouw rules for THIS bestemming
@@ -576,6 +602,66 @@ async def get_bestemmingsplan_data(x_rd: float, y_rd: float, bag_sampling_points
     return result
 
 
+def _kart_snapshot_line(label: str, values: Optional[List[str]], empty_fallback: str) -> str:
+    if values:
+        return f"- **{label}:** {', '.join(values)} _(PDOK GetFeatureInfo op dit adres-/samplepunt)_"
+    return f"- **{label}:** **{empty_fallback}**"
+
+
+def format_kaartsnapshot_for_llm(data: Dict) -> str:
+    """
+    Structured WMS-derived facts used to reduce hedging:
+    overlays are either named in PDOK responses or explicitly 'not returned for this pixel'.
+    """
+    lines = [
+        "## Kaart-snapshot PDOK (feitelijk, dit adres-/samplepunt)",
+        "Gebruik dit blok feitelijk in je antwoord; verzin geen aanvullende overlays.",
+        "**Belangrijk:** 'Geen object in deze WMS-response voor dit punt' betekent: géén attribuuttoewijzing in PDOK bij deze querypunten;",
+        "het is géén garantie dat er nergens op het perceel geen ander object bestaat óf dat de officiële tekst geen aanvullende regels stelt.",
+        "",
+        "### Bindende formulering (verplicht in het gebruikersantwoord)",
+        "- Voor elke overlay (dubbel/functie/gebied/bouw): begin met **'Van toepassing volgens WMS-response: …'** (met namen uit dit snapshot) **of** met **'Niet gevonden in deze WMS-response voor dit punt'** voor die laag.",
+        "- Gebruik **niet** zinnen als 'het is belangrijk om te controleren of er … is' zonder dat de plantekst of dit snapshot dat onbevestigd laat.",
+        "- Gebruiksregels (zoals wonen op de begane grond) baseer je op **Bestemmingsartikel / Volledige planregels** en vermeld **artikel/lid** waar dat in de tekst staat.",
+        "",
+        "### Snapshot",
+    ]
+    if data.get("bestemming"):
+        bron = data.get("bestemming_bron") or ""
+        bron_note = ""
+        if bron == "nearby":
+            bron_note = " _(bron: nabijgelegen kaartpunten)_"
+        elif bron == "sampled_bag":
+            bron_note = " _(bron: meerderheids-sample op BAG-pandpolygon)_"
+        elif bron == "sampled":
+            bron_note = " _(bron: meerderheids-sample rond adres)_"
+        lines.append(
+            f"- **Enkelbestemming (kaartattribuut):** {data['bestemming']}{bron_note}"
+        )
+    else:
+        lines.append("- **Enkelbestemming (kaartattribuut):** **Niet geretourneerd in WMS-response voor dit punt**")
+
+    lines.append("- **Bouwvlak (kaartattribuut):** " + ("ja" if data.get("bouwvlak") else "nee"))
+    mv = data.get("maatvoering") or []
+    if mv:
+        lines.append(
+            "- **Maatvoering:** " + "; ".join(mv) + " _(één of meer maatvoerings-objecten bij dit punt)_"
+        )
+    else:
+        lines.append("- **Maatvoering:** **Geen attribuuttoewijzing in deze WMS-response voor dit punt**")
+
+    db = data.get("dubbelbestemmingen") or []
+    lines.append(_kart_snapshot_line("Dubbelbestemming(en)", db if db else None, "Geen dubbelbestemming in deze WMS-response voor dit punt"))
+    gf = data.get("gebiedsaanduidingen") or []
+    lines.append(_kart_snapshot_line("Gebiedsaanwijzing(en) / gebiedsaanduiding", gf if gf else None, "Geen gebiedsaanwijzing in deze WMS-response voor dit punt"))
+    ff = data.get("functieaanduidingen") or []
+    lines.append(_kart_snapshot_line("Functieaanduiding(en)", ff if ff else None, "Geen functieaanduiding in deze WMS-response voor dit punt"))
+    ba = data.get("bouwaanduidingen") or []
+    lines.append(_kart_snapshot_line("Bouwaanduiding(en)", ba if ba else None, "Geen bouwaanduiding in deze WMS-response voor dit punt"))
+    lines.append("")
+    return "\n".join(lines)
+
+
 def format_bestemmingsplan_for_llm(data: Dict) -> str:
     """
     Format bestemmingsplan data for the LLM.
@@ -601,32 +687,7 @@ def format_bestemmingsplan_for_llm(data: Dict) -> str:
             lines.append(f"Status: {data['plan_status']}")
         lines.append("")
 
-    # Perceel-specifieke kenmerken (from WMS map attributes)
-    if data.get("bestemming"):
-        bron = data.get("bestemming_bron", "onbekend")
-        if bron == "nearby":
-            lines.append(f"**Waarschijnlijke bestemming nabij dit perceel: {data['bestemming']}**")
-            lines.append("_(Afgeleid uit nabijgelegen kaartobjecten; verifieer in 'Regels op de kaart')_")
-        elif bron == "sampled_bag":
-            lines.append(f"**Bestemming op dit perceel: {data['bestemming']}**")
-            lines.append("_(Afgeleid uit sampling op BAG pandgeometrie)_")
-        else:
-            lines.append(f"**Bestemming op dit perceel: {data['bestemming']}**")
-    else:
-        lines.append("**Bestemming op dit perceel: ONBEKEND (kaartlaag gaf geen direct resultaat)**")
-    if data.get("bouwvlak"):
-        lines.append("Bouwvlak aanwezig: ja")
-    if data.get("maatvoering"):
-        lines.append(f"Maatvoering (kaart): {'; '.join(data['maatvoering'])}")
-    if data.get("dubbelbestemmingen"):
-        lines.append(f"Dubbelbestemming(en): {', '.join(data['dubbelbestemmingen'])}")
-    if data.get("gebiedsaanduidingen"):
-        lines.append(f"Gebiedsaanduiding(en): {', '.join(data['gebiedsaanduidingen'])}")
-    if data.get("functieaanduidingen"):
-        lines.append(f"Functieaanduiding(en): {', '.join(data['functieaanduidingen'])}")
-    if data.get("bouwaanduidingen"):
-        lines.append(f"Bouwaanduiding(en): {', '.join(data['bouwaanduidingen'])}")
-    lines.append("")
+    lines.append(format_kaartsnapshot_for_llm(data))
 
     # Specific bestemming article (via anchor URL — contains all rules for this bestemming)
     artikel_tekst = data.get("bestemming_artikel_tekst", "").strip()
